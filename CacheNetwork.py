@@ -185,7 +185,6 @@ class CacheNetwork(DiGraph):
             self.edge[x][y]['weight'] = weights[e]
             self.edge[x][y]['delay'] = delays[e]
             self.edge[x][y]['pipe'] = Store(self.env)
-            self.edge[x][y]['power'] = 0
 
         self.demands = {}
         self.item_set = set()
@@ -221,6 +220,41 @@ class CacheNetwork(DiGraph):
             self.env.process(self.cache_process(x))
 
         self.env.process(self.monitor_process())
+
+    def initWireless(self, sinr_min = 0.1, sinr_max = 1.0, power_max = 100.0, gain_exp = 10, noise = 1.0):
+        """ Separate init function for wireless scenario.
+        
+            Sets/constructs the following parameters/variables:
+                 noise: Currently sets one constant noise for the entire network
+                 gains: Currently randomizes (using exponential distribution) the channel gain between each pair of nodes
+                 power: Currently distributes maximum per-node power to all outgoing edges from that node equally
+                 sinrconst: Currently randomizes (using uniform distribution) the SINR constraint (gamma) of each edge
+                 A and b: The inequality A*s >= b defines the SINR constraint for the entire network.
+                          A is a matrix populated with coefficients made of gains and SINR constraints, b is a vector of SINR constraints times noise and s is the vector of power variables, ordered by edge number found in self.edges()
+        """
+        self.noise = noise
+        self.A = [[0]*len(self.edges()) for i in range(len(self.edges()))]
+        self.b = []
+        for x in self.nodes():
+            self.node[x]['gains'] = {}
+            for y in self.nodes():
+                if x == y:
+                    self.node[x]['gains'][y] = 0
+                else:
+                    self.node[x]['gains'][y] = random.expovariate(gain_exp)
+        for i, e in enumerate(self.edges()):
+            v = e[0]
+            u = e[1]
+            self.edge[v][u]['power'] = power_max / len(self.edge[v])
+            self.edge[v][u]['sinrconst'] = random.uniform(sinr_min, sinr_max)
+            self.b[i] = self.edge[v][u]['sinrconst'] * self.noise
+            for j, ep in enumerate(self.edges()):
+                vp = ep[0]
+                up = ep[1]
+                if i == j:
+                    A[i][j] = self.node[vp]['gains'][up]
+                else:
+                    A[i][j] = -1 * self.edge[v][u]['sinrconst'] * self.node[vp]['gains'][u]
 
     def run(self, finish_time):
 
@@ -627,7 +661,6 @@ class CacheNetwork(DiGraph):
 
         logging.debug('...done at %d terms' % len(c))
         val, I, J = zip(*A)
-        print(type(J[0]))
         A = spmatrix(val, I, J, size=(total_equality_constraints,
                      number_of_placement_variables+total_ts))
         b = matrix(b)
@@ -653,7 +686,7 @@ class CacheNetwork(DiGraph):
 
         opt = res['x'][:number_of_placement_variables]
         return np.reshape(opt, (n, m), order='C'), res
-
+            
 
 class NetworkedCache(object):
     """An abstract networked cache.	

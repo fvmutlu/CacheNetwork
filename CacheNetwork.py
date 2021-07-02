@@ -199,6 +199,9 @@ class CacheNetwork(DiGraph):
             self.demands[d]['stats'] = {}
             self.item_set.add(d.item)
 
+        # initial wireless settings
+        # self.initWireless()
+
         for item in item_sources:
             for source in item_sources[item]:
                 # THIS NEEDS TO BE IMPLEMENTED BY THE NETWORKED CACHE
@@ -221,7 +224,7 @@ class CacheNetwork(DiGraph):
 
         self.env.process(self.monitor_process())
 
-    def initWireless(self, gains, sinr_min = 0.1, sinr_max = 1.0, power_max = 100.0, noise = 1.0):
+    def initWireless(self, gains, demands, sinr_min = 0.1, sinr_max = 1.0, power_max = 100.0, noise = 1.0):
         """ Separate init function for wireless scenario.
         
             Sets/constructs the following parameters/variables:
@@ -233,24 +236,66 @@ class CacheNetwork(DiGraph):
                  A and b: The inequality A*s >= b defines the SINR constraint for the entire network.
                           A is a matrix populated with coefficients made of gains and SINR constraints, b is a vector of SINR constraints times noise and s is the vector of power variables, ordered by edge number found in self.edges()
         """
+
+        # identify the edges that is used in a path
+        for e in self.edges():
+            v = e[0]
+            u = e[1]
+            self.edge[v][u]['is_in_path'] = 0
+
+        for d in demands:
+            path_d = d.path
+            for k in range(len(path_d)-1):
+                v = path_d[k]
+                u = path_d[k+1]
+                self.edge[v][u]['is_in_path'] = 1
+                self.edge[u][v]['is_in_path'] = 1
+
+        # setup SINR constriant for each in-path edge
+        for e in self.edges():
+            v = e[0]
+            u = e[1]
+            if self.edge[v][u]['is_in_path'] == 1:
+                self.edge[v][u]['sinrconst'] = random.uniform(sinr_min, sinr_max)
+            else:
+                self.edge[v][u]['sinrconst'] = 0
+
+        # count out-going in-path edges
+        for v in self.nodes():
+            self.node[v]['out_paths'] = 0
+            for u in self.nodes():
+                if self.edge[v][u]['is_in_path'] == 1:
+                    self.node[v]['out_paths'] = self.node[v]['out_paths'] +1
+
+
+        # power variables init
+        self.PowerCap = [10.0 for n in self.node]  # list: power caps
+        self.PowerFrac = {} # dict: fractional power var, initilzed to equal distributed for out-paths
+        for v in self.nodes():
+            self.PowerFrac[v] = {}
+            for u in self.nodes():
+                self.PowerFrac[v][u] = self.PowerCap[v] / self.node[v]
+
         self.noise = noise
         self.A = [[0]*len(self.edges()) for i in range(len(self.edges()))]
         self.b = []
         for i, e in enumerate(self.edges()):
             v = e[0]
             u = e[1]
-            self.edge[v][u]['power'] = power_max / len(self.edge[v])
-            self.edge[v][u]['sinrconst'] = random.uniform(sinr_min, sinr_max)
+            #self.edge[v][u]['power'] = power_max / len(self.edge[v])
+            self.edge[v][u]['power'] = self.PowerCap[v] * self.PowerFrac[v][u]
+            #self.edge[v][u]['sinrconst'] = random.uniform(sinr_min, sinr_max)
             self.edge[v][u]['gain'] = gains[e]
             #self.edge[v][u]['linkcost'] = 1/gains[e]
+            # Note: for edges not in path, still apply
             self.b[i] = self.edge[v][u]['sinrconst'] * self.noise
             for j, ep in enumerate(self.edges()):
                 vp = ep[0]
                 up = ep[1]
                 if i == j:
-                    A[i][j] = self.edge[vp][up]['gain']
+                    self.A[i][j] = self.edge[vp][up]['gain']
                 else:
-                    A[i][j] = -1 * self.edge[v][u]['sinrconst'] * self.edge[vp][u]['gain']
+                    self.A[i][j] = -1 * self.edge[v][u]['sinrconst'] * self.edge[vp][u]['gain']
 
     def run(self, finish_time):
 
@@ -1444,7 +1489,7 @@ def main():
     logging.info('...done. Generated %d demands' % len(demands))
     #plt.hist([ d.item for d in demands], bins=np.arange(args.catalog_size)+0.5)
     # plt.show()
-
+ 
     construct_stats['demands'] = len(demands)
 
     logging.info('Generating capacities...')

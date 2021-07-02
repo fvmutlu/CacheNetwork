@@ -221,36 +221,41 @@ class CacheNetwork(DiGraph):
 
         self.env.process(self.monitor_process())
 
-    def initWireless(self, gains, sinr_min = 0.1, sinr_max = 1.0, power_max = 100.0, noise = 1.0):
+    def initWireless(self, gains, SC, sinr_min = 0.1, sinr_max = 1.0, power_max = 100.0, noise = 1.0):
         """ Separate init function for wireless scenario.
         
             Sets/constructs the following parameters/variables:
-                 noise: Currently sets one constant noise for the entire network
-                 gains: Gets channel gain on each edge from generated HetNet topology
+                 noise: Currently sets one constant noise for the entire network (Default value 1)
+                 gains: Gets channel gain on each edge from generated HetNet topology (No default value)
                  linkcost: Currently just inverse of channel gain
-                 power: Currently distributes maximum per-node power to all outgoing edges from that node equally
-                 sinrconst: Currently randomizes (using uniform distribution) the SINR constraint (gamma) of each edge
+                 power: Currently distributes maximum per-node power to all outgoing edges from that node equally (Power max default value 100)
+                 sinrconst: Currently randomizes (using uniform distribution) the SINR constraint (gamma) of each edge (Default is between 0.1 < sinrconst < 1.0)
                  A and b: The inequality A*s >= b defines the SINR constraint for the entire network.
                           A is a matrix populated with coefficients made of gains and SINR constraints, b is a vector of SINR constraints times noise and s is the vector of power variables, ordered by edge number found in self.edges()
         """
         self.noise = noise
         self.A = [[0]*len(self.edges()) for i in range(len(self.edges()))]
-        self.b = []
+        self.b = [0]*len(self.edges())
         for i, e in enumerate(self.edges()):
             v = e[0]
             u = e[1]
+            #print((v,u))
             self.edge[v][u]['power'] = power_max / len(self.edge[v])
             self.edge[v][u]['sinrconst'] = random.uniform(sinr_min, sinr_max)
             self.edge[v][u]['gain'] = gains[e]
             #self.edge[v][u]['linkcost'] = 1/gains[e]
+        for i, e in enumerate(self.edges()):
+            v = e[0]
+            u = e[1]
             self.b[i] = self.edge[v][u]['sinrconst'] * self.noise
             for j, ep in enumerate(self.edges()):
                 vp = ep[0]
                 up = ep[1]
-                if i == j:
-                    A[i][j] = self.edge[vp][up]['gain']
-                else:
-                    A[i][j] = -1 * self.edge[v][u]['sinrconst'] * self.edge[vp][u]['gain']
+                if vp <= SC:
+                    if i == j:
+                        self.A[i][j] = self.edge[vp][up]['gain']
+                    elif vp != u:
+                        self.A[i][j] = -1 * self.edge[v][u]['sinrconst'] * self.edge[vp][u]['gain']
 
     def run(self, finish_time):
 
@@ -657,6 +662,7 @@ class CacheNetwork(DiGraph):
 
         logging.debug('...done at %d terms' % len(c))
         val, I, J = zip(*A)
+        J = list(map(int,J))
         A = spmatrix(val, I, J, size=(total_equality_constraints,
                      number_of_placement_variables+total_ts))
         b = matrix(b)
@@ -1211,7 +1217,7 @@ class LMinCache(NetworkedCache):
         return max(self.cache.state(item), float(item in self.permanent_set))
 
     def non_zero_state_items(self):
-        return self.cache._state.keys()+list(self.permanent_set)
+        return list(self.cache._state.keys())+list(self.permanent_set)
 
 
 def main():
@@ -1254,8 +1260,8 @@ def main():
                         'lollipop', 'expander', 'hypercube', 'star', 'barabasi_albert', 'watts_strogatz', 'regular', 'powerlaw_tree', 'small_world', 'geant', 'abilene', 'dtelekom', 'servicenetwork', 'hetnet'])
     parser.add_argument('--graph_size', default=100,
                         type=int, help='Network size')
-    parser.add_argument('--hetnet_params', default=(10,3,3,3),
-                        type=int, help='Hetnet parameters as tuple (V,SC,R_cell,pathloss_exp). Ex: (10,3,3,3)')
+    parser.add_argument('--hetnet_params', nargs='+', default=[10,3,3,3],
+                        type=int, help='Hetnet parameters as tuple (V,SC,R_cell,pathloss_exp). Ex: 10 3 3 3')
     parser.add_argument('--graph_degree', default=4, type=int,
                         help='Degree. Used by balanced_tree, regular, barabasi_albert, watts_strogatz')
     parser.add_argument('--graph_p', default=0.10, type=int,
@@ -1334,7 +1340,7 @@ def main():
         if args.graph_type == 'servicenetwork':
             return topologies.ServiceNetwork()
         if args.graph_type == 'hetnet':
-            return topologies.HetNet(args.hetnet_params)
+            return topologies.HetNet(*args.hetnet_params)
 
     def cacheGenerator(capacity, _id):
         if args.cache_type == 'LRU':
@@ -1379,7 +1385,7 @@ def main():
         weights[(xx, yy)] = random.uniform(args.min_weight, args.max_weight)
         weights[(yy, xx)] = weights[(xx, yy)]
         if args.graph_type == 'hetnet':
-            gains[(xx, yy)] = G.edges[xx, yy]['gain'] # Will be necessary for power calculations for HetNet case
+            gains[(xx, yy)] = temp_graph.edges[x, y]['gain'] # Will be necessary for power calculations for HetNet case
             gains[(yy, xx)] = gains[(xx, yy)]
     graph_size = G.number_of_nodes()
     edge_size = G.number_of_edges()
@@ -1390,8 +1396,12 @@ def main():
     construct_stats['edge_size'] = edge_size
 
     logging.info('Generating item sources...')
-    item_sources = dict((item, [list(G.nodes())[source]]) for item, source in zip(range(
-        args.catalog_size), np.random.choice(range(graph_size), args.catalog_size)))
+    if args.graph_type == 'hetnet': # For now assume MC is the source for all items in HetNet case
+        item_sources = dict((item, [0]) for item in range(args.catalog_size))
+    else:
+        item_sources = dict((item, [list(G.nodes())[source]]) for item, source in zip(range(
+            args.catalog_size), np.random.choice(range(graph_size), args.catalog_size)))
+    print(item_sources)
     logging.info('...done. Generated %d sources' % len(item_sources))
     logging.debug('Generated sources:')
     for item in item_sources:
@@ -1417,7 +1427,7 @@ def main():
     pmf = np.array([factor(i) for i in range(args.catalog_size)])
     pmf /= sum(pmf)
     distr = rv_discrete(values=(range(args.catalog_size), pmf))
-    if args.catalog_size < args.demand_size:
+    if args.catalog_size <= args.demand_size:
         items_requested = list(distr.rvs(
             size=(args.demand_size-args.catalog_size))) + list(range(args.catalog_size))
     else:
@@ -1428,12 +1438,13 @@ def main():
     demands_per_query_node = args.demand_size // args.query_nodes
     remainder = args.demand_size % args.query_nodes
     demands = []
-    for x in query_node_list:
+    print(query_node_list)
+    for i, x in enumerate(query_node_list):
         dem = demands_per_query_node
-        if x < remainder:
+        if i < remainder:
             dem = dem+1
-        if args.graph_type == 'hetnet':
-            new_dems = [Demand(items_requested[pos], shortest_path(G, x, "nodeMC", weight='cost'), # For HetNet shortest path depends on link costs and is always routed to MC
+        if args.graph_type == 'hetnet':            
+            new_dems = [Demand(items_requested[pos], shortest_path(G, x, number_map["nodeMC"], weight='cost'), # For HetNet shortest path depends on link costs and is always routed to MC
                            random.uniform(args.min_rate, args.max_rate)) for pos in range(len(demands), len(demands)+dem)]
         else:
             new_dems = [Demand(items_requested[pos], shortest_path(G, x, item_sources[items_requested[pos]][0], weight='weight'),
@@ -1457,7 +1468,9 @@ def main():
 
     logging.info('Building CacheNetwork')
     cnx = CacheNetwork(G, cacheGenerator, demands, item_sources, capacities, weights, weights,
-                       args.warmup, args.monitoring_rate, args.demand_change_rate, args.min_rate, args.max_rate)
+                       args.warmup, args.monitoring_rate, args.demand_change_rate, args.min_rate, args.max_rate) # This initializes a random process for link delays based on weights, it will be different for HetNet
+    if args.graph_type == 'hetnet':
+        cnx.initWireless(gains, args.hetnet_params[1]) # For HetNet we have to initialize wireless parameters, currently only gains need to be passed, sinr_min/max, power_max and noise can also be set
     logging.info('...done')
 
     Y, res = cnx.minimizeRelaxation()

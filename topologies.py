@@ -474,6 +474,7 @@ def HetNet(V, SC, R_cell, pathloss_exponent):
     G = Graph()
     
     # Generate and name nodes
+    #G.add_node("nodeBH")
     G.add_node("nodeMC")    
     for n in range(SC):
         G.add_node("nodeSC"+str(n))
@@ -481,16 +482,20 @@ def HetNet(V, SC, R_cell, pathloss_exponent):
         G.add_node("nodeU"+str(n))
     
     # Generate and name edges
+    #G.add_edge("nodeBH", "nodeMC") # Between backhaul and MC
+    for n in range(V-SC-1):
+        G.add_edge("nodeMC", "nodeU"+str(n))  # Between MC and all Us
     for n in range(SC):
-        G.add_edge("nodeMC", "nodeSC"+str(n))
+        G.add_edge("nodeMC", "nodeSC"+str(n)) # Between MC and each SC
         for i in range(SC):
-            G.add_edge("nodeSC"+str(n), "nodeSC"+str(i))
+            G.add_edge("nodeSC"+str(n), "nodeSC"+str(i)) # Between every pair of SCs
         for i in range(V-SC-1):
-            G.add_edge("nodeSC"+str(n), "nodeU"+str(i))    
+            G.add_edge("nodeSC"+str(n), "nodeU"+str(i))  # Between each SC and all Us
     G.remove_edges_from(selfloop_edges(G))
     
     # Assign node positions
     # Currently completely randomizes uniformly inside square
+    #G.nodes["nodeBH"]['pos'] = (0.001,0.001)
     G.nodes["nodeMC"]['pos'] = (0,0)
     for n in G.nodes():
         G.nodes[n]['pos'] = np.random.uniform(-R_cell,R_cell,2)

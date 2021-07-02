@@ -221,12 +221,13 @@ class CacheNetwork(DiGraph):
 
         self.env.process(self.monitor_process())
 
-    def initWireless(self, sinr_min = 0.1, sinr_max = 1.0, power_max = 100.0, gain_exp = 10, noise = 1.0):
+    def initWireless(self, gains, sinr_min = 0.1, sinr_max = 1.0, power_max = 100.0, noise = 1.0):
         """ Separate init function for wireless scenario.
         
             Sets/constructs the following parameters/variables:
                  noise: Currently sets one constant noise for the entire network
-                 gains: Currently randomizes (using exponential distribution) the channel gain between each pair of nodes
+                 gains: Gets channel gain on each edge from generated HetNet topology
+                 linkcost: Currently just inverse of channel gain
                  power: Currently distributes maximum per-node power to all outgoing edges from that node equally
                  sinrconst: Currently randomizes (using uniform distribution) the SINR constraint (gamma) of each edge
                  A and b: The inequality A*s >= b defines the SINR constraint for the entire network.
@@ -235,26 +236,21 @@ class CacheNetwork(DiGraph):
         self.noise = noise
         self.A = [[0]*len(self.edges()) for i in range(len(self.edges()))]
         self.b = []
-        for x in self.nodes():
-            self.node[x]['gains'] = {}
-            for y in self.nodes():
-                if x == y:
-                    self.node[x]['gains'][y] = 0
-                else:
-                    self.node[x]['gains'][y] = random.expovariate(gain_exp)
         for i, e in enumerate(self.edges()):
             v = e[0]
             u = e[1]
             self.edge[v][u]['power'] = power_max / len(self.edge[v])
             self.edge[v][u]['sinrconst'] = random.uniform(sinr_min, sinr_max)
+            self.edge[v][u]['gain'] = gains[e]
+            #self.edge[v][u]['linkcost'] = 1/gains[e]
             self.b[i] = self.edge[v][u]['sinrconst'] * self.noise
             for j, ep in enumerate(self.edges()):
                 vp = ep[0]
                 up = ep[1]
                 if i == j:
-                    A[i][j] = self.node[vp]['gains'][up]
+                    A[i][j] = self.edge[vp][up]['gain']
                 else:
-                    A[i][j] = -1 * self.edge[v][u]['sinrconst'] * self.node[vp]['gains'][u]
+                    A[i][j] = -1 * self.edge[v][u]['sinrconst'] * self.edge[vp][u]['gain']
 
     def run(self, finish_time):
 
@@ -1255,9 +1251,11 @@ def main():
     parser.add_argument('--query_nodes', default=100, type=int,
                         help='Number of nodes generating queries')
     parser.add_argument('--graph_type', default="erdos_renyi", type=str, help='Graph type', choices=['erdos_renyi', 'balanced_tree', 'hypercube', "cicular_ladder", "cycle", "grid_2d",
-                        'lollipop', 'expander', 'hypercube', 'star', 'barabasi_albert', 'watts_strogatz', 'regular', 'powerlaw_tree', 'small_world', 'geant', 'abilene', 'dtelekom', 'servicenetwork'])
+                        'lollipop', 'expander', 'hypercube', 'star', 'barabasi_albert', 'watts_strogatz', 'regular', 'powerlaw_tree', 'small_world', 'geant', 'abilene', 'dtelekom', 'servicenetwork', 'hetnet'])
     parser.add_argument('--graph_size', default=100,
                         type=int, help='Network size')
+    parser.add_argument('--hetnet_params', default=(10,3,3,3),
+                        type=int, help='Hetnet parameters as tuple (V,SC,R_cell,pathloss_exp). Ex: (10,3,3,3)')
     parser.add_argument('--graph_degree', default=4, type=int,
                         help='Degree. Used by balanced_tree, regular, barabasi_albert, watts_strogatz')
     parser.add_argument('--graph_p', default=0.10, type=int,
@@ -1335,6 +1333,8 @@ def main():
             return topologies.Abilene()
         if args.graph_type == 'servicenetwork':
             return topologies.ServiceNetwork()
+        if args.graph_type == 'hetnet':
+            return topologies.HetNet(args.hetnet_params)
 
     def cacheGenerator(capacity, _id):
         if args.cache_type == 'LRU':
@@ -1370,12 +1370,17 @@ def main():
     number_map = dict(zip(temp_graph.nodes(), range(len(temp_graph.nodes()))))
     G.add_nodes_from(number_map.values())
     weights = {}
+    if args.graph_type == 'hetnet':
+        gains = {}
     for (x, y) in temp_graph.edges():
         xx = number_map[x]
         yy = number_map[y]
         G.add_edges_from(((xx, yy), (yy, xx)))
         weights[(xx, yy)] = random.uniform(args.min_weight, args.max_weight)
         weights[(yy, xx)] = weights[(xx, yy)]
+        if args.graph_type == 'hetnet':
+            gains[(xx, yy)] = G.edges[xx, yy]['gain'] # Will be necessary for power calculations for HetNet case
+            gains[(yy, xx)] = gains[(xx, yy)]
     graph_size = G.number_of_nodes()
     edge_size = G.number_of_edges()
     logging.info('...done. Created graph with %d nodes and %d edges' %
@@ -1395,8 +1400,11 @@ def main():
     construct_stats['sources'] = len(item_sources)
 
     logging.info('Generating query node list...')
-    query_node_list = [list(G.nodes())[i] for i in random.sample(
-        range(graph_size), args.query_nodes)]
+    if args.graph_type == 'hetnet':
+        query_node_list = [list(G.nodes())[i] for i in range(args.hetnet_params[1]+1, args.hetnet_params[0])] # User nodes are query nodes for HetNet
+    else:
+        query_node_list = [list(G.nodes())[i] for i in random.sample(
+            range(graph_size), args.query_nodes)]
     logging.info('...done. Generated %d query nodes.' % len(query_node_list))
 
     construct_stats['query_nodes'] = len(query_node_list)
@@ -1424,7 +1432,11 @@ def main():
         dem = demands_per_query_node
         if x < remainder:
             dem = dem+1
-        new_dems = [Demand(items_requested[pos], shortest_path(G, x, item_sources[items_requested[pos]][0], weight='weight'),
+        if args.graph_type == 'hetnet':
+            new_dems = [Demand(items_requested[pos], shortest_path(G, x, "nodeMC", weight='cost'), # For HetNet shortest path depends on link costs and is always routed to MC
+                           random.uniform(args.min_rate, args.max_rate)) for pos in range(len(demands), len(demands)+dem)]
+        else:
+            new_dems = [Demand(items_requested[pos], shortest_path(G, x, item_sources[items_requested[pos]][0], weight='weight'),
                            random.uniform(args.min_rate, args.max_rate)) for pos in range(len(demands), len(demands)+dem)]
         logging.debug(pp(new_dems))
         demands = demands + new_dems

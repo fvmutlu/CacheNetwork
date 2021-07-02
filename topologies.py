@@ -1,5 +1,5 @@
-from networkx import Graph
-
+from networkx import Graph, selfloop_edges, shortest_path
+import numpy as np
 
 def Dtelekom():
     G = Graph()
@@ -467,4 +467,36 @@ def GEANT():
     G.add_edge("nodeI", "nodeK")
     G.add_edge("nodeJ", "nodeK")
     G.add_edge("nodeK", "nodeL")
+    return G
+
+def HetNet(V, SC, R_cell, pathloss_exponent):
+    # Initialize graph
+    G = Graph()
+    
+    # Generate and name nodes
+    G.add_node("nodeMC")    
+    for n in range(SC):
+        G.add_node("nodeSC"+str(n))
+    for n in range(V-SC-1):
+        G.add_node("nodeU"+str(n))
+    
+    # Generate and name edges
+    for n in range(SC):
+        G.add_edge("nodeMC", "nodeSC"+str(n))
+        for i in range(SC):
+            G.add_edge("nodeSC"+str(n), "nodeSC"+str(i))
+        for i in range(V-SC-1):
+            G.add_edge("nodeSC"+str(n), "nodeU"+str(i))    
+    G.remove_edges_from(selfloop_edges(G))
+    
+    # Assign node positions
+    # Currently completely randomizes uniformly inside square
+    G.nodes["nodeMC"]['pos'] = (0,0)
+    for n in G.nodes():
+        G.nodes[n]['pos'] = np.random.uniform(-R_cell,R_cell,2)
+        
+    # Assign edge gains
+    for (v,u) in G.edges():
+        G.edges[v,u]['gain'] = min( 1, np.linalg.norm( G.nodes[v]['pos'] - G.nodes[u]['pos'] ) ** (-pathloss_exponent) )
+        G.edges[v,u]['cost'] = 1/G.edges[v,u]['gain']
     return G

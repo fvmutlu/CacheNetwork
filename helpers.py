@@ -2,7 +2,11 @@ from cvxopt import solvers
 from cvxopt import matrix
 import numpy as np
 from scipy.stats import rv_discrete
-
+#from scipy.spatial import Voronoi
+#from scipy.spatial import voronoi_plot_2d
+#from shapely.geometry import Point, MultiPoint, Polygon
+#import matplotlib.pyplot as plt
+#import sys
 
 def projectToSimplex(d, cap):
     keys, vals = zip(*[(key, d[key]) for key in d])
@@ -86,3 +90,5 @@ def constructDistribution(d, cap):
     #    print "Placements ",placements,"with prob",prob,"summing to",np.sum(prob.values())
 
     return placements, prob, rv_discrete(values=(prob.keys(), prob.values()))
+
+    

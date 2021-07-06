@@ -221,7 +221,7 @@ class CacheNetwork(DiGraph):
 
         self.env.process(self.monitor_process())
 
-    def initWireless(self, gains, SC, sinr_min = 0.1, sinr_max = 1.0, power_max = 100.0, noise = 1.0):
+    def initWireless(self, T, V, SC, gains, power_max = 10, sinr = 0.1, noise = 1.0):
         """ Separate init function for wireless scenario.
         
             Sets/constructs the following parameters/variables:
@@ -233,10 +233,106 @@ class CacheNetwork(DiGraph):
                  A and b: The inequality A*s >= b defines the SINR constraint for the entire network.
                           A is a matrix populated with coefficients made of gains and SINR constraints, b is a vector of SINR constraints times noise and s is the vector of power variables, ordered by edge number found in self.edges()
         """
+        # Additional wireless parameters
+        self.T = T
+        self.graphsize = V
+        self.PowerCap = [power_max] * V
+        self.PowerFrac = {}
+        #self.PowerFrac_pre_projection = {}
+        self.Power_LP_A = 0.0 * np.identity(self.graphsize**2)
+        self.Power_LP_b = 0.0 * np.arange(self.graphsize**2)
+        self.A_nonnegative = np.identity(self.graphsize**2)
+        self.b_nonnegative = 0.0 * np.arange(self.graphsize **2)
+        self.A_powercap = 0.0 * np.arange(self.graphsize **3).reshape(self.graphsize , self.graphsize**2)
+        self.b_powercap = -1.0 * np.ones(self.graphsize)
+        self.WirelessGain = {}
+        self.w_gradient = {}
+        self.w_tilde = [] # vector/list
         self.noise = noise
-        self.A = [[0]*len(self.edges()) for i in range(len(self.edges()))]
-        self.b = [0]*len(self.edges())
+        
+        #self.A = [[0]*len(self.edges()) for i in range(len(self.edges()))]
+        #self.b = [0]*len(self.edges())
+        
+        # Identify the edges that used in a path
+        for e in self.edges():
+			v = e[0]
+			u = e[1]
+			self.edge[v][u]['is_in_path'] = 0
+
+        for d in self.demands:
+            path_d = d.path
+            for k in range(len(path_d)-1):
+                v = path_d[k]
+                u = path_d[k+1]
+                self.edge[v][u]['is_in_path'] = 1
+                self.edge[u][v]['is_in_path'] = 1
+        
+        for e in self.edges():
+            v = e[0]
+            u = e[1]
+            if self.edge[v][u]['is_in_path'] == 1:
+                self.edge[v][u]['sinrconst'] = sinr
+            else:
+                self.edge[v][u]['sinrconst'] = 0
+        
+        # Count outgoing in-path edges
+        for v in self.nodes():
+			self.node[v]['out_paths'] = 0
+        for e in self.edges():
+			v = e[0]
+			u = e[1]
+			if self.edge[v][u]['is_in_path'] == 1:
+				self.node[v]['out_paths'] += 1
+        
+        # WirelessGain is derived from edge ['gain']
+        for v in self.nodes():
+            self.WirelessGain[v] = {}
+            self.PowerFrac[v] = {}
+            for u in self.nodes():
+                self.WirelessGain[v][u] = 0.0
+                if (v,u) in self.edges() and self.edge[v][u]['is_in_path'] == 1:
+                    self.PowerFrac[v][u] = self.PowerCap[v] / self.node[v]['out_paths']
+                else:
+                    self.PowerFrac[v][u] = 0
+        
+        # Initially, evenly distributed power to out-paths
+		for v in self.nodes():
+			self.PowerFrac[v] = {}
+			for u in self.nodes():
+				if (v,u) in self.edges() and self.edge[v][u]['is_in_path'] == 1:
+					self.PowerFrac[v][u] = self.PowerCap[v] / self.node[v]['out_paths']
+				else:
+					self.PowerFrac[v][u] = 0
+		for e in self.edges():
+			v = e[0]
+			u = e[1]
+			self.edge[v][u]['power'] = self.PowerCap[v] * self.PowerFrac[v][u]
+			#self.edge[v][u]['gain'] = gains[e]
+			self.edge[v][u]['gain'] = 1.0 # temp setting
+			self.WirelessGain[v][u] = 1.0
+
+        # Push power to each node
+        self.push_power ()
         for i, e in enumerate(self.edges()):
+            v = e[0]
+            u = e[1]
+            self.Power_LP_b[i] = self.edge[v][u]['sinrconst'] * self.noise
+            self.Power_LP_A[i][v * self.graphsize + u] = 1.0 * self.WirelessGain[v][u] * self.PowerCap[v]
+            for up in self.nodes():
+                if up != u:
+                    self.Power_LP_A[i][v * self.graphsize + up] = -1.0 * self.edge[v][u]['sinrconst'] * self.WirelessGain[v][u] * self.PowerCap[v]
+            for vp in self.nodes():
+                if vp != v:
+                    for up in self.nodes():
+                        self.Power_LP_A[i][vp * self.graphsize + up] = -1.0* self.edge[v][u]['sinrconst'] * self.WirelessGain[vp][u] * self.PowerCap[vp]
+        
+        for v in self.nodes():
+            for u in self.nodes():
+                self.A_powercap[v][v * self.graphsize + u] = -1.0
+        self.b_powercap = -1.0 * np.ones(self.graphsize)
+        print("Power initialized at time "+str(self.env.now))
+        
+        """ for i, e in enumerate(self.edges()):
             v = e[0]
             u = e[1]
             #print((v,u))
@@ -255,7 +351,75 @@ class CacheNetwork(DiGraph):
                     if i == j:
                         self.A[i][j] = self.edge[vp][up]['gain']
                     elif vp != u:
-                        self.A[i][j] = -1 * self.edge[v][u]['sinrconst'] * self.edge[vp][u]['gain']
+                        self.A[i][j] = -1 * self.edge[v][u]['sinrconst'] * self.edge[vp][u]['gain'] """
+    
+    def push_power(self):
+        for v in self.nodes():
+            power_cap = self.PowerCap[v]
+            power_frac_vect = self.PowerFrac[v]
+            self.node[v]['cache'].cache._w = power_frac_vect
+            self.node[v]['cache'].cache._powercap = power_cap
+            for u in self.nodes():
+                if (v,u) in self.edges():
+                    self.edge[v][u]['power'] = self.PowerFrac[v][u] * self.PowerCap[v]
+        print("Power pushed to caches at time "+str(self.env.now))
+        
+    def power_update_process(self,alpha = 0.05):
+        # Process that pull the subgradients of power from caches, 
+        # project and update global power every T 
+        while True:
+            yield self.env.timeout(self.T)
+            
+            print("Power global-updating at time "+str(self.env.now))
+            # step0: reset parameters
+            for v in self.nodes():
+                self.w_gradient[v] = {}
+                for u in self.nodes():
+                    self.w_gradient[v][u] = 0.0
+            self.w_tilde = [0.0 for i in range(self.graphsize **2)]
+            
+            # step1: pull n-scores from each node and compute estimated subgradient from 
+            for v in self.nodes():
+                for u in self.nodes():
+                    if u in self.node[v]['cache'].cache._Score_n.keys():
+                        self.w_gradient[v][u] = self.node[v]['cache'].cache._Score_n[u] *1.0 / self.T
+                    else:
+                        #print("not in key")
+                        self.w_gradient[v][u] = 0.0
+            
+            # step2: calculate pre-projection w vector
+            for v in self.nodes():
+                for u in self.nodes():
+                    self.w_tilde[v*self.graphsize+u] = self.PowerFrac[v][u] + alpha* self.w_gradient[v][u]
+            #print("w_tilde = "+str(self.w_tilde))    
+            
+            # step3: project w_tilde vector into constraint set Aw>=b, i.e. min w'Pw + Q'w, s.t. Gw <= h
+            Q_qp = matrix(-2.0 * np.transpose(np.array(self.w_tilde)))
+            #print("Q = "+str(Q))
+            P_qp = matrix(np.identity(self.graphsize ** 2))
+            
+            G_qp = matrix( -1.0 * np.vstack((self.Power_LP_A, self.A_nonnegative, self.A_powercap)))
+            #G_qp = matrix( -1.0 * np.vstack((self.A_nonnegative, self.A_powercap)))
+           
+            h_qp = matrix( -1.0 * np.transpose(np.hstack((self.Power_LP_b, self.b_nonnegative, self.b_powercap))))
+            #h_qp = matrix( -1.0 * np.transpose(np.hstack((self.b_nonnegative, self.b_powercap))))
+            
+            sol_qp = qp(P_qp, Q_qp, G_qp, h_qp)
+            
+            # step3: update global power variable
+            w_bar = sol_qp['x']
+            epsilon = 1.e-3
+            for v in self.nodes():
+                for u in self.nodes():
+                    if np.abs(w_bar[v * self.graphsize + u]) > epsilon:
+                        self.PowerFrac[v][u] = w_bar[v * self.graphsize + u]
+                    else:
+                        self.PowerFrac[v][u] = 0.0
+            #print("self.PowerFrac = "+str(self.PowerFrac))
+            
+            # step4: push power to caches and edges
+            self.push_power()
+            print("...done")
 
     def run(self, finish_time):
 
@@ -1260,8 +1424,8 @@ def main():
                         'lollipop', 'expander', 'hypercube', 'star', 'barabasi_albert', 'watts_strogatz', 'regular', 'powerlaw_tree', 'small_world', 'geant', 'abilene', 'dtelekom', 'servicenetwork', 'hetnet'])
     parser.add_argument('--graph_size', default=100,
                         type=int, help='Network size')
-    parser.add_argument('--hetnet_params', nargs='+', default=[10,3,3,3],
-                        type=int, help='Hetnet parameters as tuple (V,SC,R_cell,pathloss_exp). Ex: 10 3 3 3')
+    parser.add_argument('--hetnet_params', nargs='+', default=[10,3,10,0.1,3,3],
+                        type=int, help='Hetnet parameters as tuple (V,SC,power_max,sinr,R_cell,pathloss_exp). Ex: 10 3 10 0.1 3 3')
     parser.add_argument('--graph_degree', default=4, type=int,
                         help='Degree. Used by balanced_tree, regular, barabasi_albert, watts_strogatz')
     parser.add_argument('--graph_p', default=0.10, type=int,
@@ -1470,7 +1634,7 @@ def main():
     cnx = CacheNetwork(G, cacheGenerator, demands, item_sources, capacities, weights, weights,
                        args.warmup, args.monitoring_rate, args.demand_change_rate, args.min_rate, args.max_rate) # This initializes a random process for link delays based on weights, it will be different for HetNet
     if args.graph_type == 'hetnet':
-        cnx.initWireless(gains, args.hetnet_params[1]) # For HetNet we have to initialize wireless parameters, currently only gains need to be passed, sinr_min/max, power_max and noise can also be set
+        cnx.initWireless(args.T, args.hetnet_params[0], args.hetnet_params[1], gains, args.hetnet_params[2], args.hetnet_params[3]) # For HetNet we have to initialize wireless parameters, currently only gains need to be passed, sinr_min/max, power_max and noise can also be set
     logging.info('...done')
 
     Y, res = cnx.minimizeRelaxation()

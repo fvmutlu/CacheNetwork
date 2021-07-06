@@ -174,6 +174,11 @@ class LMinimalCache(Cache):
         self._last_shuffle_time = 0.0
         self._cache = set()
         self._k = 0
+        self._B = {}  # variable B_{f,p}(v) for explore message processing
+        self._Score_n = {}  # score n_{v,u} for all out-going in-path u
+        self._w = {} # transmitting power frac
+        self._powercap = {} # transmitting power cap
+        #self._w_gradient = {} # current estimated gradient of w
 
     def __str__(self):
         """String representation.
@@ -220,6 +225,25 @@ class LMinimalCache(Cache):
         else:
             self._grad[item] = value
         # print self._grad[item]
+    
+    def setB(self, demand_d, B_value):  # set specific B value
+        if demand_d in self._B.keys():
+            self._B[demand_d] = B_value
+        else:
+            self._B[demand_d] = B_value
+
+    def getB(self, demand_d):  # read specific B value
+        if demand_d in self._B.keys():
+            return self._B[demand_d]
+        else:
+            return 0
+
+    def AddOnScore_n(self, receive_node, n_AddOnValue
+                ):  # update score n that used for power gradient est
+        if receive_node in self._Score_n:
+            self._Score_n[receive_node] += n_AddOnValue
+        else:
+            self._Score_n[receive_node] = n_AddOnValue
 
     def shuffle(self, time):
         T = time - self._last_shuffle_time
@@ -274,8 +298,7 @@ class LMinimalCache(Cache):
         # print "sliding:",sliding_average
         # print "past:",self._past_states
 
-        placements, probs, distr = constructDistribution(
-            sliding_average, self._capacity)
+        placements, probs, distr = constructDistribution(sliding_average, self._capacity)
 
         u = random.random()
         sumsofar = 0.0
@@ -289,10 +312,19 @@ class LMinimalCache(Cache):
 
         self._cache = set(placements[key])
         # print self._cache, placements, probs
+        
+        # update power variable for wireless
+        #global PowerFrac
+        #self._w = PowerFrac[self._id]
+        
+        # time slot average for power variable subgradient
 
         self._k = k
         self._grad = {}
+        self._Score_n = {}
         self._last_shuffle_time = time
+        #print("** Node: " + str(self._id) + ", cache state: "+str(self._state))
+        #print("power state subgradient:" + str(self._w_gradient))
 
     def state(self, item):
 

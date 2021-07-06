@@ -1,0 +1,2 @@
+python2 CacheNetwork.py outputfile --graph_type abilene --debug_level ERROR --cache_type LMIN --min_capacity 3 --max_capacity 3 --query_nodes 3 --catalog_size 30 --demand_size 40 --max_weight 100 --time 25 --T 10
+

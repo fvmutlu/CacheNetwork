@@ -8,13 +8,12 @@ from networkx import Graph, DiGraph, shortest_path
 import networkx
 import random
 from cvxopt import spmatrix, matrix
-from cvxopt.solvers import lp
+from cvxopt.solvers import lp, qp
 from simpy import *
 from scipy.stats import rv_discrete
 import numpy as np
 from numpy.linalg import matrix_rank
-import logging
-import argparse
+import logging, argparse
 import itertools
 from statsmodels.distributions.empirical_distribution import ECDF
 import pickle
@@ -34,19 +33,18 @@ def pp(l):
 
 class Demand:
     """ A demand object. Contains the item requested, the path a request follows, as a list, and the
-        rate with which requests are generated. Tallies count various metrics.
+       rate with which requests are generated. Tallies count various metrics.
 
-        Attributes:
-            item: the id of the item requested
-            path: a list of nodes to be visited
-            rate: the rate with which this request is generated
-            query_source: first node on the path
-            item_source: last node on the path
-    """
-
+       Attributes:
+	   item: the id of the item requested
+	   path: a list of nodes to be visited
+	   rate: the rate with which this request is generated
+	   query_source: first node on the path
+	   item_source: last node on the path
+   """
     def __init__(self, item, path, rate):
         """ Initialize a new request.
-        """
+   	"""
         self.item = item
         self.path = path
         self.rate = rate
@@ -58,44 +56,44 @@ class Demand:
         return Demand.__repr__(self)
 
     def __repr__(self):
-        return 'Demand('+','.join(map(str, [self.item, self.path, self.rate]))+')'
+        return 'Demand(' + ','.join(map(
+            str, [self.item, self.path, self.rate])) + ')'
 
     def succ(self, node):
         """ The successor of a node in the path. 
-        """
+   	"""
         path = self.path
         if node not in path:
             return None
         i = path.index(node)
-        if i+1 == len(path):
+        if i + 1 == len(path):
             return None
         else:
-            return path[i+1]
+            return path[i + 1]
 
     def pred(self, node):
         """The predecessor of a node in the path.
-        """
+	"""
         path = self.path
         if node not in path:
             return None
         i = path.index(node)
-        if i-1 < 0:
+        if i - 1 < 0:
             return None
         else:
-            return path[i-1]
+            return path[i - 1]
 
 
 class Message(object):
     """A Message object. 
 
-       Attributes:
-           header: the header of the message (e.g., query_message, response_message
-           payload: the payload, can be set by the programmer
-           length: length, to be used in transmission delay calculations
-           stats: statistics collected as the message traverses nodes
-           u_bit: indicates if the message is going upstream or downstream
-    """
-
+      Attributes:
+          header: the header of the message (e.g., query_message, response_message
+          payload: the payload, can be set by the programmer
+          length: length, to be used in transmission delay calculations
+          stats: statistics collected as the message traverses nodes
+	  u_bit: indicates if the message is going upstream or downstream
+   """
     def __init__(self, header, payload, length, stats, u_bit):
         self.header = header
         self.payload = payload
@@ -114,49 +112,70 @@ class Message(object):
         return Message.__repr__(self)
 
     def __repr__(self):
-        return pp(['Message(', self.header, ',', self.payload, ',', self.length, ',', self.stats, ')'])
+        return pp([
+            'Message(', self.header, ',', self.payload, ',', self.length, ',',
+            self.stats, ')'
+        ])
 
 
 class QueryMessage(Message):
     """
-         A query message.
-    """
-
+	A query message.
+   """
     def __init__(self, d, query_id, stats=None):
-        Message.__init__(self, header=("QUERY", d, query_id), payload=None,
-                         length=CONFIG.QUERY_MESSAGE_LENGTH, stats=stats, u_bit=True)
+        Message.__init__(self,
+                         header=("QUERY", d, query_id),
+                         payload=None,
+                         length=CONFIG.QUERY_MESSAGE_LENGTH,
+                         stats=stats,
+                         u_bit=True)
 
 
 class ResponseMessage(Message):
     """
-         A response message.
-    """
-
+	A response message.
+   """
     def __init__(self, d, query_id, stats=None):
-        Message.__init__(self, header=("RESPONSE", d, query_id), payload=None,
-                         length=CONFIG.RESPONSE_MESSAGE_LENGTH, stats=stats, u_bit=False)
+        Message.__init__(self,
+                         header=("RESPONSE", d, query_id),
+                         payload=None,
+                         length=CONFIG.RESPONSE_MESSAGE_LENGTH,
+                         stats=stats,
+                         u_bit=False)
 
 
 class CacheNetwork(DiGraph):
     """A cache network. 
 
-      A cache network comprises a weighted graph and a list of demands. Each node in the graph is associated with a cache of finite capacity.
-      NetworkCaches must support a message receive operation, that determines how they handle incoming messages.
+     A cache network comprises a weighted graph and a list of demands. Each node in the graph is associated with a cache of finite capacity.
+     NetworkCaches must support a message receive operation, that determines how they handle incoming messages.
 
-      The cache networks handles messaging using simpy stores and processes. In partiqular, each cache, edge and demand is associated with a 
-      Store object, that receives, stores, and processes messages from simpy processes.
+     The cache networks handles messaging using simpy stores and processes. In partiqular, each cache, edge and demand is associated with a 
+     Store object, that receives, stores, and processes messages from simpy processes.
 
-      In more detail:
-      - Each demand is associated with two processes, one that generates new queries, and one that monitors and logs completed queries (existing only for logging purposes)
-      - Each cache/node is associated with a process that receives messages, and processes them, and produces new messages to be routed, e.g., towards neigboring edges
-      - Each edge is associated with a process that receives messages to be routed over the edge, and delivers them to the appropriate target node.
-        During "delivery", messages are (a) delayed, according to configuration parameters, and (b) statistics about them are logged (e.g., number of hops, etc.)
-
-      Finally, a global monitoring process computes the social welfare at poisson time intervals.
-
-    """
-
-    def __init__(self, G, cacheGenerator, demands, item_sources, capacities, weights, delays, warmup=0, monitoring_rate=1.0, demand_change_rate=0, demand_min=1.0, demand_max=1.0):
+     In more detail:
+     - Each demand is associated with two processes, one that generates new queries, and one that monitors and logs completed queries (existing only for logging purposes)
+     - Each cache/node is associated with a process that receives messages, and processes them, and produces new messages to be routed, e.g., towards neigboring edges
+     - Each edge is associated with a process that receives messages to be routed over the edge, and delivers them to the appropriate target node.
+       During "delivery", messages are (a) delayed, according to configuration parameters, and (b) statistics about them are logged (e.g., number of hops, etc.)
+     
+     Finally, a global monitoring process computes the social welfare at poisson time intervals.
+   
+   """
+    def __init__(self,
+                 G,
+                 cacheGenerator,
+                 demands,
+                 item_sources,
+                 capacities,
+                 weights,
+                 delays,
+                 T,
+                 warmup=0,
+                 monitoring_rate=1.0,
+                 demand_change_rate=0,
+                 demand_min=1.0,
+                 demand_max=1.0):
         self.env = Environment()
         self.warmup = warmup
         self.demandstats = {}
@@ -167,21 +186,30 @@ class CacheNetwork(DiGraph):
         self.demand_change_rate = demand_change_rate
         self.demand_min = demand_min
         self.demand_max = demand_max
+        
+        # parameters used for wireless
+        self.T = T
+        self.graphsize = G.number_of_nodes()
+        self.PowerCap = []
+        self.PowerFrac = {}
+        self.Power_LP_A = []
+        self.Power_LP_b = []
+        self.A_nonnegative = []
+        self.b_nonnegative = []
+        self.A_powercap = []
+        self.b_powercap = []
+        #self.PowerFrac_pre_projection = {}
+        self.WirelessGain = {}
+        self.w_gradient = {}
+        self.w_tilde = [] # vector/list
 
-        self.node = {}
-        self.edge = {}
         DiGraph.__init__(self, G)
         for x in self.nodes():
-            self.node[x] = {}
             self.node[x]['cache'] = cacheGenerator(capacities[x], x)
             self.node[x]['pipe'] = Store(self.env)
         for e in self.edges():
             x = e[0]
-            self.edge[x] = {}
-        for e in self.edges():
-            x = e[0]
             y = e[1]
-            self.edge[x][y] = {}
             self.edge[x][y]['weight'] = weights[e]
             self.edge[x][y]['delay'] = delays[e]
             self.edge[x][y]['pipe'] = Store(self.env)
@@ -192,20 +220,22 @@ class CacheNetwork(DiGraph):
         for d in demands:
             self.demands[d] = {}
             self.demands[d]['pipe'] = Store(self.env)
-            self.demands[d]['queries_spawned'] = 0
-            self.demands[d]['queries_satisfied'] = 0
+            self.demands[d]['queries_spawned'] = 0L
+            self.demands[d]['queries_satisfied'] = 0L
             self.demands[d]['queries_logged'] = 0.0
             self.demands[d]['pending'] = set([])
             self.demands[d]['stats'] = {}
             self.item_set.add(d.item)
 
-        # initial wireless settings
-        # self.initWireless()
-
         for item in item_sources:
             for source in item_sources[item]:
-                # THIS NEEDS TO BE IMPLEMENTED BY THE NETWORKED CACHE
-                self.node[source]['cache'].makePermanent(item)
+                self.node[source]['cache'].makePermanent(
+                    item
+                )  ###THIS NEEDS TO BE IMPLEMENTED BY THE NETWORKED CACHE
+		
+		# initial wireless settings
+        self.initWireless(demands=demands)
+        
 
         for d in self.demands:
             self.env.process(self.spawn_queries_process(d))
@@ -221,81 +251,209 @@ class CacheNetwork(DiGraph):
 
         for x in self.nodes():
             self.env.process(self.cache_process(x))
+        
+        # start power update process
+        self.env.process(self.power_update_process())
 
         self.env.process(self.monitor_process())
 
-    def initWireless(self, gains, demands, sinr_min = 0.1, sinr_max = 1.0, power_max = 100.0, noise = 1.0):
-        """ Separate init function for wireless scenario.
+    def initWireless(self, demands, gains = {}, sinr_min = 0.1, sinr_max = 1.0, power_max = 100.0, noise = 1.0):
+		
+		# identify the edges that used in a path
+		print("Network edges: "+str(self.edges()))
+		for e in self.edges():
+			v = e[0]
+			u = e[1]
+			self.edge[v][u]['is_in_path'] = 0
+
+		print("Network paths:")
+		for d in demands:
+			path_d = d.path
+			print(path_d)
+			for k in range(len(path_d)-1):
+				v = path_d[k]
+				u = path_d[k+1]
+				self.edge[v][u]['is_in_path'] = 1
+				self.edge[u][v]['is_in_path'] = 1
+
+		# setup SINR sontraints for each in-path edge
+		for e in self.edges():
+			v = e[0]
+			u = e[1]
+			if self.edge[v][u]['is_in_path'] == 1:
+				#self.edge[v][u]['sinrconst'] = random.uniform(sinr_min, sinr_max)
+				self.edge[v][u]['sinrconst'] = 0.1
+			else:
+				self.edge[v][u]['sinrconst'] = 0
+
+		# count out-going in-path edges
+		for v in self.nodes():
+			self.node[v]['out_paths'] = 0
+		for e in self.edges():
+			v = e[0]
+			u = e[1]
+			if self.edge[v][u]['is_in_path'] == 1:
+				self.node[v]['out_paths'] += 1
+		#for v in self.nodes():
+			#print(self.node[v]['out_paths'])
+
+		# power variable init
+		self.PowerCap = [10.0 for n in self.nodes()]
+  
+        # Wirelessgain is derived from edge.['gain']
+		for v in self.nodes():
+			self.WirelessGain[v] = {}
+			for u in self.nodes():
+				self.WirelessGain[v][u] = 0.0
+
+        # initially, evenly distributed power to out-paths
+		for v in self.nodes():
+			self.PowerFrac[v] = {}
+			for u in self.nodes():
+				if (v,u) in self.edges() and self.edge[v][u]['is_in_path'] == 1:
+					self.PowerFrac[v][u] = self.PowerCap[v] / self.node[v]['out_paths']
+				else:
+					self.PowerFrac[v][u] = 0
+		for e in self.edges():
+			v = e[0]
+			u = e[1]
+			self.edge[v][u]['power'] = self.PowerCap[v] * self.PowerFrac[v][u]
+			#self.edge[v][u]['gain'] = gains[e]
+			self.edge[v][u]['gain'] = 1.0 # temp setting
+			self.WirelessGain[v][u] = 1.0
+   
+        # push power to each node
+		self.push_power()
+
+		# noise init
+		self.noise = noise
+
+		# LP parameter init
+		# Note: LP problem is formulated as 'AW >= b'
+		#self.Power_LP_A = [[0 for e1 in range(self.graphsize**2)] for e2 in self.edges()]
+		self.Power_LP_A = 0.0* np.identity(self.graphsize**2)
+		#self.Power_LP_b = [0 for e in self.edges()]
+		self.Power_LP_b = 0.0* np.arange(self.graphsize**2)
+		#print(Power_LP_A)
+		#for i, e in enumerate(self.edges()):
+		#	v = e[0]
+		#	u = e[1]
+		#	#print(i,e,v,u,self.edge[v][u]['sinrconst'])
+		#	Power_LP_b[i] = self.edge[v][u]['sinrconst'] * self.noise
+		#	for j, ep in enumerate(self.edges()):
+		#		vp = ep[0]
+		#		up = ep[1]
+		#		if i == j:
+		#			Power_LP_A[i][j] = self.edge[vp][up]['gain']
+		#		else:
+		#			if (vp,u) in self.edges():
+		#				gain_vp_u = self.edge[vp][u]['gain']
+		#			else:
+		#				gain_vp_u = 0.0
+		#			#print(i,j,v,u,self.edge[v][u]['sinrconst'],vp,u)
+		#			Power_LP_A[i][j] = -1 * self.edge[v][u]['sinrconst'] * gain_vp_u
+		#print(Power_LP_A)
+		edge_id = 0
+		for v in self.nodes():
+			for u in self.nodes():
+				if (v,u) in self.edges():
+					print("LP: Edge "+str((v,u))+"setting")
+					# b = gammavu*Nu
+					self.Power_LP_b[edge_id] = self.edge[v][u]['sinrconst'] * self.noise
+					# Matrix A:
+					# term 1: Gvu * s_bar(v) wvu
+					self.Power_LP_A[edge_id][v*self.graphsize+u] = 1.0 * self.WirelessGain[v][u] * self.PowerCap[v]
+					# term 2: gammavu*Gvu*s_bar(v)*sum_up neq u: wvup
+					for up in self.nodes():
+						if u!=up:
+							self.Power_LP_A[edge_id][v*self.graphsize+up] = -1.0* self.edge[v][u]['sinrconst'] * self.WirelessGain[v][u] * self.PowerCap[v]
+					# term 3: gammavu*sum_vp neq v: Gvpu S_bar(vp) * sum_up: wvpup
+					for vp in self.nodes():
+						if vp != v:
+							for up in self.nodes():
+								#print("vp = "+str(vp)+", up = "+str(up)+" -> "+str(WirelessGain[v][u]))
+								self.Power_LP_A[edge_id][vp*self.graphsize+up] = -1.0* self.edge[v][u]['sinrconst'] * self.WirelessGain[vp][u] * self.PowerCap[vp]
+					edge_id += 1
+		self.A_nonnegative = np.identity(self.graphsize **2)
+		self.b_nonnegative = 0.0 * np.arange(self.graphsize **2)
+		self.A_powercap = 0.0 * np.arange(self.graphsize **3).reshape(self.graphsize , self.graphsize**2)
+		for v in self.nodes():
+			for u in self.nodes():
+				self.A_powercap[v][v*self.graphsize + u] = -1.0
+		self.b_powercap = -1.0 * np.ones(self.graphsize)
+		#print(self.Power_LP_A)
+		#print(self.Power_LP_b)
+		print("Power initialized at time "+str(self.env.now))
+  
+    def push_power(self):
+        # push global power variable to cache and edges
+        for v in self.nodes():
+            power_cap = self.PowerCap[v]
+            power_frac_vect = self.PowerFrac[v]
+            self.node[v]['cache'].cache._w = power_frac_vect
+            self.node[v]['cache'].cache._powercap = power_cap
+            for u in self.nodes():
+                if (v,u) in self.edges():
+                    self.edge[v][u]['power'] = self.PowerFrac[v][u] * self.PowerCap[v]
+        print("Power pushed to caches at time "+str(self.env.now))
         
-            Sets/constructs the following parameters/variables:
-                 noise: Currently sets one constant noise for the entire network
-                 gains: Gets channel gain on each edge from generated HetNet topology
-                 linkcost: Currently just inverse of channel gain
-                 power: Currently distributes maximum per-node power to all outgoing edges from that node equally
-                 sinrconst: Currently randomizes (using uniform distribution) the SINR constraint (gamma) of each edge
-                 A and b: The inequality A*s >= b defines the SINR constraint for the entire network.
-                          A is a matrix populated with coefficients made of gains and SINR constraints, b is a vector of SINR constraints times noise and s is the vector of power variables, ordered by edge number found in self.edges()
-        """
+    def power_update_process(self,alpha = 0.05):
+        # Process that pull the subgradients of power from caches, 
+        # project and update global power every T 
+        while True:
+            yield self.env.timeout(self.T)
+            
+            print("Power global-updating at time "+str(self.env.now))
+            # step0: reset parameters
+            for v in self.nodes():
+                self.w_gradient[v] = {}
+                for u in self.nodes():
+                    self.w_gradient[v][u] = 0.0
+            self.w_tilde = [0.0 for i in range(self.graphsize **2)]
+            
+            # step1: pull n-scores from each node and compute estimated subgradient from 
+            for v in self.nodes():
+                for u in self.nodes():
+                    if u in self.node[v]['cache'].cache._Score_n.keys():
+                        self.w_gradient[v][u] = self.node[v]['cache'].cache._Score_n[u] *1.0 / self.T
+                    else:
+                        #print("not in key")
+                        self.w_gradient[v][u] = 0.0
+            
+            # step2: calculate pre-projection w vector
+            for v in self.nodes():
+                for u in self.nodes():
+                    self.w_tilde[v*self.graphsize+u] = self.PowerFrac[v][u] + alpha* self.w_gradient[v][u]
+            #print("w_tilde = "+str(self.w_tilde))    
+            
+            # step3: project w_tilde vector into constraint set Aw>=b, i.e. min w'Pw + Q'w, s.t. Gw <= h
+            Q_qp = matrix(-2.0 * np.transpose(np.array(self.w_tilde)))
+            #print("Q = "+str(Q))
+            P_qp = matrix(np.identity(self.graphsize ** 2))
+            
+            G_qp = matrix( -1.0 * np.vstack((self.Power_LP_A, self.A_nonnegative, self.A_powercap)))
+            #G_qp = matrix( -1.0 * np.vstack((self.A_nonnegative, self.A_powercap)))
+           
+            h_qp = matrix( -1.0 * np.transpose(np.hstack((self.Power_LP_b, self.b_nonnegative, self.b_powercap))))
+            #h_qp = matrix( -1.0 * np.transpose(np.hstack((self.b_nonnegative, self.b_powercap))))
+            
+            sol_qp = qp(P_qp, Q_qp, G_qp, h_qp)
+            
+            # step3: update global power variable
+            w_bar = sol_qp['x']
+            epsilon = 1.e-3
+            for v in self.nodes():
+                for u in self.nodes():
+                    if np.abs(w_bar[v * self.graphsize + u]) > epsilon:
+                        self.PowerFrac[v][u] = w_bar[v * self.graphsize + u]
+                    else:
+                        self.PowerFrac[v][u] = 0.0
+            #print("self.PowerFrac = "+str(self.PowerFrac))
+            
+            # step4: push power to caches and edges
+            self.push_power()
+            print("...done")
 
-        # identify the edges that is used in a path
-        for e in self.edges():
-            v = e[0]
-            u = e[1]
-            self.edge[v][u]['is_in_path'] = 0
-
-        for d in demands:
-            path_d = d.path
-            for k in range(len(path_d)-1):
-                v = path_d[k]
-                u = path_d[k+1]
-                self.edge[v][u]['is_in_path'] = 1
-                self.edge[u][v]['is_in_path'] = 1
-
-        # setup SINR constriant for each in-path edge
-        for e in self.edges():
-            v = e[0]
-            u = e[1]
-            if self.edge[v][u]['is_in_path'] == 1:
-                self.edge[v][u]['sinrconst'] = random.uniform(sinr_min, sinr_max)
-            else:
-                self.edge[v][u]['sinrconst'] = 0
-
-        # count out-going in-path edges
-        for v in self.nodes():
-            self.node[v]['out_paths'] = 0
-            for u in self.nodes():
-                if self.edge[v][u]['is_in_path'] == 1:
-                    self.node[v]['out_paths'] = self.node[v]['out_paths'] +1
-
-
-        # power variables init
-        self.PowerCap = [10.0 for n in self.node]  # list: power caps
-        self.PowerFrac = {} # dict: fractional power var, initilzed to equal distributed for out-paths
-        for v in self.nodes():
-            self.PowerFrac[v] = {}
-            for u in self.nodes():
-                self.PowerFrac[v][u] = self.PowerCap[v] / self.node[v]
-
-        self.noise = noise
-        self.A = [[0]*len(self.edges()) for i in range(len(self.edges()))]
-        self.b = []
-        for i, e in enumerate(self.edges()):
-            v = e[0]
-            u = e[1]
-            #self.edge[v][u]['power'] = power_max / len(self.edge[v])
-            self.edge[v][u]['power'] = self.PowerCap[v] * self.PowerFrac[v][u]
-            #self.edge[v][u]['sinrconst'] = random.uniform(sinr_min, sinr_max)
-            self.edge[v][u]['gain'] = gains[e]
-            #self.edge[v][u]['linkcost'] = 1/gains[e]
-            # Note: for edges not in path, still apply
-            self.b[i] = self.edge[v][u]['sinrconst'] * self.noise
-            for j, ep in enumerate(self.edges()):
-                vp = ep[0]
-                up = ep[1]
-                if i == j:
-                    self.A[i][j] = self.edge[vp][up]['gain']
-                else:
-                    self.A[i][j] = -1 * self.edge[v][u]['sinrconst'] * self.edge[vp][u]['gain']
 
     def run(self, finish_time):
 
@@ -305,18 +463,21 @@ class CacheNetwork(DiGraph):
 
     def spawn_queries_process(self, d):
         """ A process that spawns queries.
-
-            Queries are generated according to a Poisson process with the appropriate rate. Queries generated are pushed to the query source node.
+	    
+	    Queries are generated according to a Poisson process with the appropriate rate. Queries generated are pushed to the query source node.
         """
         while True:
             logging.debug(
-                pp([self.env.now, ':New query for', d.item, 'to follow', d.path]))
+                pp([
+                    self.env.now, ':New query for', d.item, 'to follow', d.path
+                ]))
             _id = self.demands[d]['queries_spawned']
-            # create a new query message at the query_source
-            qm = QueryMessage(d, _id)
+            qm = QueryMessage(
+                d, _id)  # create a new query message at the query_source
             self.demands[d]['pending'].add(_id)
             self.demands[d]['queries_spawned'] += 1
-            yield self.node[d.query_source]['pipe'].put((qm, (d, d.query_source)))
+            yield self.node[d.query_source]['pipe'].put(
+                (qm, (d, d.query_source)))
             yield self.env.timeout(random.expovariate(d.rate))
 
     def demand_monitor_process(self, d):
@@ -336,19 +497,25 @@ class CacheNetwork(DiGraph):
 
             if dem is not d:
                 logging.warning(
-                    pp([now, ':', d, 'received a message', msg, 'aimed for demand', dem]))
+                    pp([
+                        now, ':', d, 'received a message', msg,
+                        'aimed for demand', dem
+                    ]))
                 continue
 
             if query_id not in self.demands[d]['pending']:
                 logging.warning(
-                    pp(['Query', query_id, 'of', d, 'satisfied but not pending']))
+                    pp([
+                        'Query', query_id, 'of', d, 'satisfied but not pending'
+                    ]))
                 continue
             else:
                 self.demands[d]['pending'].remove(query_id)
 
             logging.debug(
-                pp(['Query', query_id, 'of', d, 'satisfied with stats', stats]))
-            self.demands[d]['queries_satisfied'] += 1
+                pp(['Query', query_id, 'of', d, 'satisfied with stats',
+                    stats]))
+            self.demands[d]['queries_satisfied'] += 1L
 
             if now >= self.warmup:
                 self.demands[d]['queries_logged'] += 1.0
@@ -363,50 +530,64 @@ class CacheNetwork(DiGraph):
         """ A process changing the demand periodically 
         """
         while True:
-            yield self.env.timeout(1./self.demand_change_rate)
+            yield self.env.timeout(1. / self.demand_change_rate)
             new_rate = random.uniform(self.demand_min, self.demand_max)
-            logging.info(pp([self.env.now, ':Demand for ', d.item, 'following',
-                         d.path, 'changing rate from', d.rate, 'to', new_rate]))
+            logging.info(
+                pp([
+                    self.env.now, ':Demand for ', d.item, 'following', d.path,
+                    'changing rate from', d.rate, 'to', new_rate
+                ]))
             d.rate = new_rate
 
     def compute_opt_process(self):
         ''' Process recomputing optimal values after demand changes. Used only if demand changes periodically
-        '''
-        yield self.env.timeout(0.01*1./self.demand_change_rate)  # Tiny offset, to make sure all demands have been updated by measurement time
+          '''
+        yield self.env.timeout(
+            0.01 * 1. / self.demand_change_rate
+        )  #Tiny offset, to make sure all demands have been updated by measurement time
 
         while True:
             Y, res = self.minimizeRelaxation()
             logging.info(
-                pp([self.env.now, ': Optimal Relaxation is: ', self.relaxation(Y)]))
+                pp([
+                    self.env.now, ': Optimal Relaxation is: ',
+                    self.relaxation(Y)
+                ]))
             logging.info(
-                pp([self.env.now, ': Expected caching gain at relaxation point is: ', self.expected_caching_gain(Y)]))
+                pp([
+                    self.env.now,
+                    ': Expected caching gain at relaxation point is: ',
+                    self.expected_caching_gain(Y)
+                ]))
             optimal_stats = {}
             optimal_stats['res'] = res
             optimal_stats['Y'] = Y
             optimal_stats['L'] = self.relaxation(Y)
             optimal_stats['F'] = self.expected_caching_gain(Y)
             self.optstats[self.env.now] = optimal_stats
-            yield self.env.timeout(1./self.demand_change_rate)
+            yield self.env.timeout(1. / self.demand_change_rate)
 
     def message_pusher_process(self, e):
         """ A process handling message transmissions over edges.
 
-            It delays messages, accoding to delay specs, and increments stat counters in them.
+	    It delays messages, accoding to delay specs, and increments stat counters in them.
         """
 
         while True:
             msg = yield self.edge[e[0]][e[1]]['pipe'].get()
-            logging.debug(
-                pp([self.env.now, ':', 'Pipe at', e, 'pushing', msg]))
+            logging.debug(pp([self.env.now, ':', 'Pipe at', e, 'pushing',
+                              msg]))
             time_before = self.env.now
-            yield self.env.timeout(msg.length*random.expovariate(1/self.edge[e[0]][e[1]]['delay']))
+            yield self.env.timeout(
+                msg.length *
+                random.expovariate(1 / self.edge[e[0]][e[1]]['delay']))
             delay = self.env.now - time_before
             msg.stats['delay'] += delay
             msg.stats['hops'] += 1.0
             msg.stats['weight'] += self.edge[e[0]][e[1]]['weight']
             if not msg.u_bit:
-                msg.stats['downweight'] += self.edge[e[0]][e[1]
-                                                           ]['weight'] + self.edge[e[1]][e[0]]['weight']
+                msg.stats['downweight'] += self.edge[e[0]][
+                    e[1]]['weight'] + self.edge[e[1]][e[0]]['weight']
             logging.debug(
                 pp([self.env.now, ':', 'Pipe at', e, 'delivering', msg]))
             self.node[e[1]]['pipe'].put((msg, e))
@@ -414,14 +595,14 @@ class CacheNetwork(DiGraph):
     def cache_process(self, x):
         """A process handling messages sent to caches.
 
-           It is effectively a wrapper for a receive call, made to a NetworkedCache object. 
+	   It is effectively a wrapper for a receive call, made to a NetworkedCache object. 
 
-        """
+	"""
         while True:
             (msg, e) = yield self.node[x]['pipe'].get()
-            # THIS NEEDS TO BE IMPLEMENTED BY THE NETWORKED CACHE!!!!
             generated_messages = self.node[e[1]]['cache'].receive(
-                msg, e, self.env.now)
+                msg, e, self.env.now
+            )  #THIS NEEDS TO BE IMPLEMENTED BY THE NETWORKED CACHE!!!!
             for (new_msg, new_e) in generated_messages:
                 if new_e[1] in self.demands:
                     yield self.demands[new_e[1]]['pipe'].put(new_msg)
@@ -430,24 +611,24 @@ class CacheNetwork(DiGraph):
 
     def cachesToMatrix(self):
         """Constructs a matrix containing cache information.
-        """
+	"""
         zipped = []
         n = len(self.nodes())
-        m = max(len(self.item_set), max(self.item_set)+1)
+        m = max(len(self.item_set), max(self.item_set) + 1)
         for x in self.nodes():
             for item in self.node[x]['cache']:
                 zipped.append((1, x, item))
 
         val, I, J = zip(*zipped)
-        J = list(map(int,J))
+
         return spmatrix(val, I, J, size=(n, m))
 
     def statesToMatrix(self):
         """Constructs a matrix containing marginal information. This assumes that caches contain a state() function, capturing maginals. Only LMin implements this
-        """
+	"""
         zipped = []
         n = len(self.nodes())
-        m = max([d.item for d in self.demands])+1
+        m = max([d.item for d in self.demands]) + 1
         Y = matrix()
         for x in self.nodes():
             for item in self.node[x]['cache'].non_zero_state_items():
@@ -459,7 +640,7 @@ class CacheNetwork(DiGraph):
 
     def social_welfare(self):
         """ Function computing the social welfare.
-        """
+	"""
         dsw = 0.0
         hsw = 0.0
         wsw = 0.0
@@ -469,21 +650,23 @@ class CacheNetwork(DiGraph):
             rate = d.rate
             sumrate += rate
             x = d.query_source
-            # THIS NEEDS TO BE IMPLEMENTED BY THE NETWORKED CACHE!!!
-            while not (item in self.node[x]['cache'] or x is d.item_source):
+            while not (
+                    item in self.node[x]['cache'] or x is d.item_source
+            ):  #THIS NEEDS TO BE IMPLEMENTED BY THE NETWORKED CACHE!!!
                 s = d.succ(x)
-                dsw += rate*(CONFIG.QUERY_MESSAGE_LENGTH *
-                             self.edge[x][s]['delay'] + CONFIG.RESPONSE_MESSAGE_LENGTH*self.edge[s][x]['delay'])
-                wsw += rate*(self.edge[x][s]['weight'] +
-                             self.edge[s][x]['weight'])
-                hsw += rate*(2)
+                dsw += rate * (
+                    CONFIG.QUERY_MESSAGE_LENGTH * self.edge[x][s]['delay'] +
+                    CONFIG.RESPONSE_MESSAGE_LENGTH * self.edge[s][x]['delay'])
+                wsw += rate * (self.edge[x][s]['weight'] +
+                               self.edge[s][x]['weight'])
+                hsw += rate * (2)
                 x = s
 
-        return (dsw/sumrate, hsw/sumrate, wsw/sumrate)
+        return (dsw / sumrate, hsw / sumrate, wsw / sumrate)
 
     def caching_gain(self):
         """ Function computing the caching gain under the present caching situation
-        """
+	"""
         X = self.cachesToMatrix()
         return self.expected_caching_gain(X)
 
@@ -499,16 +682,16 @@ class CacheNetwork(DiGraph):
             x = d.query_source
             s = d.succ(x)
             while s is not None:
-                cost += rate*(self.edge[s][x]['weight'] +
-                              self.edge[x][s]['weight'])
+                cost += rate * (self.edge[s][x]['weight'] +
+                                self.edge[x][s]['weight'])
                 x = s
                 s = d.succ(x)
 
-        return cost/sumrate
+        return cost / sumrate
 
     def expected_caching_gain(self, Y):
         """ Function computing the expected caching gain under marginals Y, presuming product form. Also computes deterministic caching gain if Y is integral.
-        """
+	"""
         ecg = 0.0
         sumrate = 0.0
         for d in self.demands:
@@ -518,20 +701,20 @@ class CacheNetwork(DiGraph):
 
             x = d.query_source
             s = d.succ(x)
-            prodsofar = 1-Y[x,int(item)]
+            prodsofar = 1 - Y[x, item]
             while s is not None:
-                ecg += rate*(self.edge[s][x]['weight'] +
-                             self.edge[x][s]['weight'])*(1-prodsofar)
+                ecg += rate * (self.edge[s][x]['weight'] +
+                               self.edge[x][s]['weight']) * (1 - prodsofar)
 
                 x = s
                 s = d.succ(x)
-                prodsofar *= 1-Y[x,int(item)]
+                prodsofar *= 1 - Y[x, item]
 
-        return ecg/sumrate
+        return ecg / sumrate
 
     def relaxation(self, Y):
         """ Function computing the relaxation of caching gain under marginals Y. Relaxation equals deterministic caching gain if Y is integral.
-        """
+	"""
         rel = 0.0
         sumrate = 0.0
         for d in self.demands:
@@ -541,20 +724,20 @@ class CacheNetwork(DiGraph):
 
             x = d.query_source
             s = d.succ(x)
-            sumsofar = Y[x,int(item)]
+            sumsofar = Y[x, item]
             while s is not None:
-                rel += rate*(self.edge[s][x]['weight'] +
-                             self.edge[x][s]['weight'])*min(1.0, sumsofar)
+                rel += rate * (self.edge[s][x]['weight'] +
+                               self.edge[x][s]['weight']) * min(1.0, sumsofar)
 
                 x = s
                 s = d.succ(x)
-                sumsofar += Y[x,int(item)]
+                sumsofar += Y[x, item]
 
-        return rel/sumrate
+        return rel / sumrate
 
     def demand_stats(self):
         """ Computed stats across demands.
-        """
+	"""
         stats = {}
         queries_logged = 0.0
         rate = 0.0
@@ -566,7 +749,7 @@ class CacheNetwork(DiGraph):
                 else:
                     stats[key] = self.demands[d]['stats'][key]
         for key in stats:
-            stats[key] = stats[key]/queries_logged
+            stats[key] = stats[key] / queries_logged
 
         return stats
 
@@ -580,12 +763,17 @@ class CacheNetwork(DiGraph):
                 ecg = self.expected_caching_gain(X)
                 rel = self.relaxation(X)
                 tot = self.cost_without_caching()
-                esw = tot-ecg
+                esw = tot - ecg
                 self.funstats[now] = (ecg, rel, esw, tot)
-                logging.info(pp([now, ':', 'DSW = %f, HSW = %f, WSW = %f' % self.sw[now],
-                             ', DEMSTATS =', self.demandstats[now], 'FUNSTATS =', self.funstats[now]]))
+                logging.info(
+                    pp([
+                        now, ':',
+                        'DSW = %f, HSW = %f, WSW = %f' % self.sw[now],
+                        ', DEMSTATS =', self.demandstats[now], 'FUNSTATS =',
+                        self.funstats[now]
+                    ]))
                 try:
-                    # if True:
+                    #if True:
                     Y = self.statesToMatrix()
                     secg = self.expected_caching_gain(Y)
                     srel = self.relaxation(Y)
@@ -593,24 +781,25 @@ class CacheNetwork(DiGraph):
                     logging.info(pp([now, ': SECG=', secg, 'SREL=', srel]))
                 except AttributeError:
                     logging.debug(pp([now, ": No states in this class"]))
-                # M=self.cachesToMatrix()
-                #formatted = [  (i,j,'*')  if self.node[i]['cache'].isPermanent(j) else (i,j)  for i,j,v in  zip(M.I,M.J,M.V)   ]
-                # logging.info(str(sorted(formatted)))
+
+#M=self.cachesToMatrix()
+#formatted = [  (i,j,'*')  if self.node[i]['cache'].isPermanent(j) else (i,j)  for i,j,v in  zip(M.I,M.J,M.V)   ]
+#logging.info(str(sorted(formatted)))
             yield self.env.timeout(random.expovariate(self.monitoring_rate))
 
     def minimizeRelaxation(self):
         n = len(self.nodes())
-        m = max([d.item for d in self.demands])+1
-        number_of_placement_variables = n*m
+        m = max([d.item for d in self.demands]) + 1
+        number_of_placement_variables = n * m
 
         def position(node, item):
-            return node*m+item
+            return node * m + item
 
         A = []
         b = []
         row = 0
 
-        # Permanent set constraints
+        #Permanent set constraints
         logging.debug('Creating permanent set constaints...')
         row = 0
         for x in self.nodes():
@@ -627,19 +816,21 @@ class CacheNetwork(DiGraph):
         G = []
         h = []
 
-        # Capacity constraints
+        #Capacity constraints
         logging.debug('Creating capacity constaints...')
-        G += [(1.0, x, position(x, item))
-              for item in range(m) for x in self.nodes()]
-        h += [self.node[x]['cache'].capacity() + len(self.node[x]['cache'].perm_set())
+        G += [(1.0, x, position(x, item)) for item in xrange(m)
               for x in self.nodes()]
+        h += [
+            self.node[x]['cache'].capacity() +
+            len(self.node[x]['cache'].perm_set()) for x in self.nodes()
+        ]
         #h += [ self.node[x]['cache'].capacity()    for x in self.nodes()]
         logging.debug('...done at %d rows' % len(h))
 
         row = n
         t = number_of_placement_variables
 
-        # t's smaller than sums of y_vi's in path
+        #t's smaller than sums of y_vi's in path
         logging.debug('Creating t up constraints...')
         for d in self.demands:
             item = d.item
@@ -659,10 +850,10 @@ class CacheNetwork(DiGraph):
 
         total_ts = t - number_of_placement_variables
 
-        # t's smaller than 1.0
+        #t's smaller than 1.0
         logging.debug('Creating t ll one constraints...')
         t = number_of_placement_variables
-        while t < (number_of_placement_variables+total_ts):
+        while t < (number_of_placement_variables + total_ts):
             G += [(1.0, row, t)]
             h += [1.0]
             row += 1
@@ -670,7 +861,7 @@ class CacheNetwork(DiGraph):
 
         logging.debug('...done at %d rows' % row)
 
-        # y's less than 1
+        #y's less than 1
         logging.debug('Creating y ll one gg 0 constraints...')
         y = 0
         while y < number_of_placement_variables:
@@ -685,9 +876,9 @@ class CacheNetwork(DiGraph):
 
         total_inequality_constraints = row
 
-        # objective
+        #objective
         logging.debug('Creating objective vector...')
-        c = number_of_placement_variables*[0]
+        c = number_of_placement_variables * [0]
         for d in self.demands:
             rate = d.rate
             path = d.path
@@ -695,39 +886,48 @@ class CacheNetwork(DiGraph):
             x = d.query_source
             s = d.succ(x)
             while s is not None:
-                c += [-rate*(self.edge[s][x]['weight'] +
-                             self.edge[x][s]['weight'])]
+                c += [
+                    -rate *
+                    (self.edge[s][x]['weight'] + self.edge[x][s]['weight'])
+                ]
                 x = s
                 s = d.succ(x)
 
         logging.debug('...done at %d terms' % len(c))
+
         val, I, J = zip(*A)
-        A = spmatrix(val, I, J, size=(total_equality_constraints,
-                     number_of_placement_variables+total_ts))
+        A = spmatrix(val,
+                     I,
+                     J,
+                     size=(total_equality_constraints,
+                           number_of_placement_variables + total_ts))
         b = matrix(b)
 
         val, I, J = zip(*G)
-        J = list(map(int,J))
-        G = spmatrix(val, I, J, size=(total_inequality_constraints,
-                     number_of_placement_variables + total_ts))
+        G = spmatrix(val,
+                     I,
+                     J,
+                     size=(total_inequality_constraints,
+                           number_of_placement_variables + total_ts))
         h = matrix(h)
 
         c = matrix(c)
 
         logging.debug('c has length %d ' % len(c))
-        logging.debug('G has dims %d x %d and matrix_rank ' %
-                      G.size + str(matrix_rank(G)))
+        logging.debug('G has dims %d x %d and matrix_rank ' % G.size +
+                      str(matrix_rank(G)))
         logging.debug('h has length %d ' % len(h))
-        logging.debug('A has dims %d x %d and matrix_rank' %
-                      A.size + str(matrix_rank(A)))
+        logging.debug('A has dims %d x %d and matrix_rank' % A.size +
+                      str(matrix_rank(A)))
         logging.debug('b has length %d ' % len(b))
 
-        # , primalstart={'x':matrix(np.zeros(c.size)*1.e-99),'s':matrix( total_inequality_constraints*[1.e-20])})
-        res = lp(c, G, h, A, b)
+        res = lp(
+            c, G, h, A, b,options={'show_progress': False}
+        )  #, primalstart={'x':matrix(np.zeros(c.size)*1.e-99),'s':matrix( total_inequality_constraints*[1.e-20])})
 
         opt = res['x'][:number_of_placement_variables]
         return np.reshape(opt, (n, m), order='C'), res
-            
+
 
 class NetworkedCache(object):
     """An abstract networked cache.	
@@ -771,9 +971,8 @@ class NetworkedCache(object):
 class PriorityNetworkCache(NetworkedCache):
     """ A Priority Networked Cache. Supports LRU,LFU, and RR policies.
 
-        Note: the capacity of the cache does not include its permanent set; i.e., the capacity concerns only files handled through the LRU principle.
+	Note: the capacity of the cache does not include its permanent set; i.e., the capacity concerns only files handled through the LRU principle.
     """
-
     def __init__(self, capacity, _id, principle):
         self.cache = PriorityCache(capacity, _id)
         self.permanent_set = set([])
@@ -786,7 +985,7 @@ class PriorityNetworkCache(NetworkedCache):
         self.principle = principle
 
     def __str__(self):
-        return str(self.cache)+'+'+str(self.permanent_set)
+        return str(self.cache) + '+' + str(self.permanent_set)
 
     def __contains__(self, item):
         return item in self.cache or item in self.permanent_set
@@ -812,62 +1011,107 @@ class PriorityNetworkCache(NetworkedCache):
         if label == "QUERY":
             item = d.item
             logging.debug(
-                pp([now, ': Query message for item', item, 'received by cache', self._id]))
+                pp([
+                    now, ': Query message for item', item, 'received by cache',
+                    self._id
+                ]))
             self.stats['queries'] += 1.0
 
             inside_cache = item in self.cache
             inside_permanent_set = item in self.permanent_set
             if inside_cache or inside_permanent_set:
-                logging.debug(pp([now, ': Item', item, 'is inside',
-                              'permanent set' if inside_permanent_set else 'cache', 'of', self._id]))
-                if inside_cache:  # i.e., not in permanent set
-                    princ_map = {'LRU': now, 'LFU': self.cache.priority(
-                        item)+1, 'RR': random.random(), 'FIFO': self.cache.priority(item)}
-                    logging.debug(pp([now, ': Priority of', item, 'updated to',
-                                  princ_map[self.principle], 'at cache', self._id]))
+                logging.debug(
+                    pp([
+                        now, ': Item', item, 'is inside',
+                        'permanent set' if inside_permanent_set else 'cache',
+                        'of', self._id
+                    ]))
+                if inside_cache:  #i.e., not in permanent set
+                    princ_map = {
+                        'LRU': now,
+                        'LFU': self.cache.priority(item) + 1,
+                        'RR': random.random(),
+                        'FIFO': self.cache.priority(item)
+                    }
+                    logging.debug(
+                        pp([
+                            now, ': Priority of', item, 'updated to',
+                            princ_map[self.principle], 'at cache', self._id
+                        ]))
                     self.cache.add(item, princ_map[self.principle])
                 self.stats['hits'] += 1
                 if self._id == d.query_source:
-                    logging.debug(pp([now, ': Response to query', query_id,
-                                  'of', d, 'delivered to query source by cache', self._id]))
+                    logging.debug(
+                        pp([
+                            now, ': Response to query', query_id, 'of', d,
+                            'delivered to query source by cache', self._id
+                        ]))
                     pred = d
                 else:
                     pred = d.pred(self._id)
                     logging.debug(
-                        pp([now, ': Response to query', query_id, 'of', d, ' generated by cache', self._id]))
+                        pp([
+                            now, ': Response to query', query_id, 'of', d,
+                            ' generated by cache', self._id
+                        ]))
                 e = (self._id, pred)
                 rmsg = ResponseMessage(d, query_id, stats=msg.stats)
                 return [(rmsg, e)]
             else:
                 logging.debug(
-                    pp([now, ': Item', item, 'is not inside', self._id, 'continue searching']))
+                    pp([
+                        now, ': Item', item, 'is not inside', self._id,
+                        'continue searching'
+                    ]))
                 succ = d.succ(self._id)
                 if succ == None:
-                    logging.error(pp([now, ':Query', query_id, 'of', d, 'reached',
-                                  self._id, 'and has nowhere to go, will be dropped']))
+                    logging.error(
+                        pp([
+                            now, ':Query', query_id, 'of', d, 'reached',
+                            self._id, 'and has nowhere to go, will be dropped'
+                        ]))
                     return []
                 e = (self._id, succ)
                 return [(msg, e)]
 
         if label == "RESPONSE":
             logging.debug(
-                pp([now, ': Response message for', d, 'received by cache', self._id]))
+                pp([
+                    now, ': Response message for', d, 'received by cache',
+                    self._id
+                ]))
             self.stats['responses'] += 1.0
             item = d.item
-            princ_map = {'LRU': now, 'LFU': self.cache.priority(
-                item)+1 if item in self.cache else 1, 'RR': random.random(), 'FIFO': self.cache.priority(item) if item in self.cache else now}
-            logging.debug(pp([now, ': Priority of', item, 'updated to',
-                          princ_map[self.principle], 'at', self._id]))
-            # add the item to the cache/update priority
-            self.cache.add(item, princ_map[self.principle])
+            princ_map = {
+                'LRU': now,
+                'LFU':
+                self.cache.priority(item) + 1 if item in self.cache else 1,
+                'RR': random.random(),
+                'FIFO':
+                self.cache.priority(item) if item in self.cache else now
+            }
+            logging.debug(
+                pp([
+                    now, ': Priority of', item, 'updated to',
+                    princ_map[self.principle], 'at', self._id
+                ]))
+            self.cache.add(item, princ_map[
+                self.principle])  #add the item to the cache/update priority
 
             if d.query_source == self._id:
-                logging.debug(pp([now, ': Response to query', query_id,
-                              'of', d, ' finally delivered by cache', self._id]))
+                logging.debug(
+                    pp([
+                        now, ': Response to query', query_id, 'of', d,
+                        ' finally delivered by cache', self._id
+                    ]))
                 pred = d
             else:
-                logging.debug(pp([now, ': Response to query', query_id, 'of', d,
-                              'passes through cache', self._id, 'moving further down path']))
+                logging.debug(
+                    pp([
+                        now, ': Response to query', query_id, 'of', d,
+                        'passes through cache', self._id,
+                        'moving further down path'
+                    ]))
                 pred = d.pred(self._id)
             e = (self._id, pred)
             return [(msg, e)]
@@ -875,32 +1119,37 @@ class PriorityNetworkCache(NetworkedCache):
 
 class ExploreMessage(Message):
     """
-         An exploration message.
-    """
-
+	An exploration message.
+   """
     def __init__(self, d, query_id, initiator, stats=None):
-        Message.__init__(self, header=("EXPLORE", d, query_id), payload=None,
-                         length=CONFIG.EXPLORE_MESSAGE_LENGTH, stats=stats, u_bit=True)
-        self. explore_source = initiator
+        Message.__init__(self,
+                         header=("EXPLORE", d, query_id),
+                         payload=None,
+                         length=CONFIG.EXPLORE_MESSAGE_LENGTH,
+                         stats=stats,
+                         u_bit=True)
+        self.explore_source = initiator
 
 
 class ExploreResponseMessage(Message):
     """
-         An exploration response message.
-    """
-
+	An exploration response message.
+   """
     def __init__(self, d, query_id, initiator, stats=None):
-        Message.__init__(self, header=("EXPLORE_RESPONSE", d, query_id), payload=None,
-                         length=CONFIG.EXPLORE_MESSAGE_LENGTH, stats=stats, u_bit=False)
-        self. explore_source = initiator
+        Message.__init__(self,
+                         header=("EXPLORE_RESPONSE", d, query_id),
+                         payload=None,
+                         length=CONFIG.EXPLORE_MESSAGE_LENGTH,
+                         stats=stats,
+                         u_bit=False)
+        self.explore_source = initiator
 
 
 class EWMAGradCache(NetworkedCache):
     """ An EWMA Gradient Networked Cache.
 
-        Note: the capacity of the cache does not include its permanent set; i.e., the capacity concerns only files handled through the EWMA principle.
+	Note: the capacity of the cache does not include its permanent set; i.e., the capacity concerns only files handled through the EWMA principle.
     """
-
     def __init__(self, capacity, _id, beta=1.0):
         self.cache = EWMACache(capacity, _id, beta)
         self._id = _id
@@ -914,7 +1163,8 @@ class EWMAGradCache(NetworkedCache):
         self.stats['explore_responses'] = 0.0
 
     def __str__(self):
-        return 'Cache: '+str(self.cache)+'Permanent: '+str(self.permanent_set)
+        return 'Cache: ' + str(self.cache) + 'Permanent: ' + str(
+            self.permanent_set)
 
     def __contains__(self, item):
         return item in self.cache or item in self.permanent_set
@@ -940,22 +1190,31 @@ class EWMAGradCache(NetworkedCache):
         if label == "QUERY":
             item = d.item
             logging.debug(
-                pp([now, ': Query message for item', item, 'received by cache', self._id]))
+                pp([
+                    now, ': Query message for item', item, 'received by cache',
+                    self._id
+                ]))
             self.stats['queries'] += 1.0
 
             inside = item in self.cache or item in self.permanent_set
             if inside:
-                logging.debug(
-                    pp([now, ': Item', item, 'is inside ', self._id]))
+                logging.debug(pp([now, ': Item', item, 'is inside ',
+                                  self._id]))
                 self.stats['hits'] += 1
                 if self._id == d.query_source:
-                    logging.debug(pp([now, ': Response to query', query_id,
-                                  'of', d, ' finally delivered by cache', self._id]))
+                    logging.debug(
+                        pp([
+                            now, ': Response to query', query_id, 'of', d,
+                            ' finally delivered by cache', self._id
+                        ]))
                     pred = d
                 else:
                     pred = d.pred(self._id)
                     logging.debug(
-                        pp([now, ': Response to query', query_id, 'of', d, ' generated by cache', self._id]))
+                        pp([
+                            now, ': Response to query', query_id, 'of', d,
+                            ' generated by cache', self._id
+                        ]))
                 e = (self._id, pred)
                 rmsg = ResponseMessage(d, query_id, stats=msg.stats)
 
@@ -965,7 +1224,10 @@ class EWMAGradCache(NetworkedCache):
                     succ = d.succ(self._id)
                     if succ != None:
                         logging.debug(
-                            pp([now, ': Item', item, 'is inside cache of ', self._id, ' will forward exploration message']))
+                            pp([
+                                now, ': Item', item, 'is inside cache of ',
+                                self._id, ' will forward exploration message'
+                            ]))
                         emsg = ExploreMessage(d, query_id, self._id)
                         e = (self._id, succ)
                         msglist += [(emsg, e)]
@@ -973,34 +1235,54 @@ class EWMAGradCache(NetworkedCache):
                 return msglist
             else:
                 logging.debug(
-                    pp([now, ': Item', item, 'is not inside', self._id, 'continue searching']))
+                    pp([
+                        now, ': Item', item, 'is not inside', self._id,
+                        'continue searching'
+                    ]))
                 succ = d.succ(self._id)
                 if succ == None:
-                    logging.error(pp([now, ':Query', query_id, 'of', d, 'reached',
-                                  self._id, 'and has nowhere to go, will be dropped']))
+                    logging.error(
+                        pp([
+                            now, ':Query', query_id, 'of', d, 'reached',
+                            self._id, 'and has nowhere to go, will be dropped'
+                        ]))
                     return []
                 e = (self._id, succ)
                 return [(msg, e)]
 
         if label == "RESPONSE":
             logging.debug(
-                pp([now, ': Response message for', d, 'received by cache', self._id]))
+                pp([
+                    now, ': Response message for', d, 'received by cache',
+                    self._id
+                ]))
             self.stats['responses'] += 1.0
             item = d.item
-            logging.debug(pp([now, ': Node', self._id, 'updating derivative of item',
-                          item, 'with measurement', msg.stats['downweight']]))
-            # does not really add item, but updates its gradient estimate
-            self.cache.add(item, msg.stats['downweight'], now)
+            logging.debug(
+                pp([
+                    now, ': Node', self._id, 'updating derivative of item',
+                    item, 'with measurement', msg.stats['downweight']
+                ]))
+            self.cache.add(
+                item, msg.stats['downweight'], now
+            )  #does not really add item, but updates its gradient estimate
             logging.debug(
                 pp([now, ': Node', self._id, ' now stores', self.cache]))
 
             if d.query_source == self._id:
-                logging.debug(pp([now, ': Response to query', query_id,
-                              'of', d, ' finally delivered by cache', self._id]))
+                logging.debug(
+                    pp([
+                        now, ': Response to query', query_id, 'of', d,
+                        ' finally delivered by cache', self._id
+                    ]))
                 pred = d
             else:
-                logging.debug(pp([now, ': Response to query', query_id, 'of', d,
-                              'passes through cache', self._id, 'moving further down path']))
+                logging.debug(
+                    pp([
+                        now, ': Response to query', query_id, 'of', d,
+                        'passes through cache', self._id,
+                        'moving further down path'
+                    ]))
                 pred = d.pred(self._id)
             e = (self._id, pred)
             return [(msg, e)]
@@ -1008,52 +1290,82 @@ class EWMAGradCache(NetworkedCache):
         if label == "EXPLORE":
             item = d.item
             logging.debug(
-                pp([now, ': Explore message for item', item, 'received by cache', self._id]))
+                pp([
+                    now, ': Explore message for item', item,
+                    'received by cache', self._id
+                ]))
             self.stats['explores'] += 1.0
 
             inside = item in self.cache or item in self.permanent_set
             if inside:
-                logging.debug(
-                    pp([now, ': Item', item, 'is inside ', self._id]))
+                logging.debug(pp([now, ': Item', item, 'is inside ',
+                                  self._id]))
                 pred = d.pred(self._id)
-                logging.debug(pp([now, ': Explore Response to query',
-                              query_id, 'of', d, ' generated by cache', self._id]))
+                logging.debug(
+                    pp([
+                        now, ': Explore Response to query', query_id, 'of', d,
+                        ' generated by cache', self._id
+                    ]))
                 e = (self._id, pred)
-                ermsg = ExploreResponseMessage(
-                    d, query_id, msg.explore_source, stats=msg.stats)
+                ermsg = ExploreResponseMessage(d,
+                                               query_id,
+                                               msg.explore_source,
+                                               stats=msg.stats)
 
                 return [(ermsg, e)]
 
             else:
                 logging.debug(
-                    pp([now, ': Item', item, 'is not inside', self._id, 'continue exploring']))
+                    pp([
+                        now, ': Item', item, 'is not inside', self._id,
+                        'continue exploring'
+                    ]))
                 succ = d.succ(self._id)
                 if succ == None:
-                    logging.debug(pp([now, ':Exploration for', query_id, 'of', d,
-                                  'reached', self._id, 'and has nowhere to go, will be dropped']))
+                    logging.debug(
+                        pp([
+                            now, ':Exploration for', query_id, 'of', d,
+                            'reached', self._id,
+                            'and has nowhere to go, will be dropped'
+                        ]))
                     return []
                 e = (self._id, succ)
                 return [(msg, e)]
 
         if label == "EXPLORE_RESPONSE":
             logging.debug(
-                pp([now, ': Explore Response message for', d, 'received by cache', self._id]))
+                pp([
+                    now, ': Explore Response message for', d,
+                    'received by cache', self._id
+                ]))
             self.stats['explore_responses'] += 1.0
             item = d.item
 
             if msg.explore_source == self._id:
                 logging.debug(
-                    pp([now, ': Node', self._id, 'received final exploration response for', query_id, 'of', d]))
-                logging.debug(pp([now, ': Node', self._id, 'updating derivative of item',
-                              item, 'with measurement', msg.stats['downweight']]))
-                # does not really add item, but updates its gradient estimate
-                self.cache.add(item, msg.stats['downweight'], now)
+                    pp([
+                        now, ': Node', self._id,
+                        'received final exploration response for', query_id,
+                        'of', d
+                    ]))
+                logging.debug(
+                    pp([
+                        now, ': Node', self._id, 'updating derivative of item',
+                        item, 'with measurement', msg.stats['downweight']
+                    ]))
+                self.cache.add(
+                    item, msg.stats['downweight'], now
+                )  #does not really add item, but updates its gradient estimate
                 logging.debug(
                     pp([now, ': Node', self._id, ' now stores', self.cache]))
                 return []
 
-            logging.debug(pp([now, ': Explore Response to query', query_id, 'of',
-                          d, 'passes through cache', self._id, 'moving further down path']))
+            logging.debug(
+                pp([
+                    now, ': Explore Response to query', query_id, 'of', d,
+                    'passes through cache', self._id,
+                    'moving further down path'
+                ]))
             pred = d.pred(self._id)
             e = (self._id, pred)
             return [(msg, e)]
@@ -1062,10 +1374,15 @@ class EWMAGradCache(NetworkedCache):
 class LMinCache(NetworkedCache):
     """ A Networked Cache minimizing the relaxation L.
 
-        Note: the capacity of the cache does not include its permanent set; i.e., the capacity concerns only files handled through the EWMA principle.
+	Note: the capacity of the cache does not include its permanent set; i.e., the capacity concerns only files handled through the EWMA principle.
     """
-
-    def __init__(self, capacity, _id, gamma=0.1, T=5, expon=0.5, interpolate=False):
+    def __init__(self,
+                 capacity,
+                 _id,
+                 gamma=0.1,
+                 T=5,
+                 expon=0.5,
+                 interpolate=False):
         self.cache = LMinimalCache(capacity, _id, gamma, expon, interpolate)
         self._id = _id
         self.permanent_set = set([])
@@ -1079,7 +1396,8 @@ class LMinCache(NetworkedCache):
         self.stats['explore_responses'] = 0.0
 
     def __str__(self):
-        return 'Cache: '+str(self.cache)+'Permanent: '+str(self.permanent_set)
+        return 'Cache: ' + str(self.cache) + 'Permanent: ' + str(
+            self.permanent_set)
 
     def __contains__(self, item):
         return item in self.cache or item in self.permanent_set
@@ -1107,18 +1425,25 @@ class LMinCache(NetworkedCache):
             item = d.item
 
             logging.debug(
-                pp([now, ': Query message for item', item, 'received by cache', self._id]))
+                pp([
+                    now, ': Query message for item', item, 'received by cache',
+                    self._id
+                ]))
             self.stats['queries'] += 1.0
 
             if self._id == d.query_source:
                 succ = d.succ(self._id)
                 if succ != None:
-                    logging.debug(pp([now, ': Item', item, 'is inside cache of ', self._id,
-                                  ' which is the query source, will prepare an exploration message']))
+                    logging.debug(
+                        pp([
+                            now, ': Item', item, 'is inside cache of ',
+                            self._id,
+                            ' which is the query source, will prepare an exploration message'
+                        ]))
                     emsg = ExploreMessage(d, query_id, self._id)
                     e = (self._id, succ)
-                    sumsofar = self.cache.state(
-                        item) + float(item in self.permanent_set)
+                    sumsofar = self.cache.state(item) + float(
+                        item in self.permanent_set)
                     emsg.payload = sumsofar
                     if sumsofar < 1.0:
                         msglist.append((emsg, e))
@@ -1126,17 +1451,28 @@ class LMinCache(NetworkedCache):
             inside_cache = item in self.cache
             inside_perm = item in self.permanent_set
             if inside_cache or inside_perm:
-                logging.debug(pp([now, ': Item', item, 'is inside %s of %d' % (
-                    'cache' if inside_cache else 'permanent set', self._id)]))
+                logging.debug(
+                    pp([
+                        now, ': Item', item,
+                        'is inside %s of %d' %
+                        ('cache' if inside_cache else 'permanent set',
+                         self._id)
+                    ]))
                 self.stats['hits'] += 1
                 if self._id == d.query_source:
-                    logging.debug(pp([now, ': Response to query', query_id,
-                                  'of', d, ' finally delivered by cache', self._id]))
+                    logging.debug(
+                        pp([
+                            now, ': Response to query', query_id, 'of', d,
+                            ' finally delivered by cache', self._id
+                        ]))
                     pred = d
                 else:
                     pred = d.pred(self._id)
                     logging.debug(
-                        pp([now, ': Response to query', query_id, 'of', d, ' generated by cache', self._id]))
+                        pp([
+                            now, ': Response to query', query_id, 'of', d,
+                            ' generated by cache', self._id
+                        ]))
                 e = (self._id, pred)
                 rmsg = ResponseMessage(d, query_id, stats=msg.stats)
 
@@ -1144,11 +1480,17 @@ class LMinCache(NetworkedCache):
 
             else:
                 logging.debug(
-                    pp([now, ': Item', item, 'is not inside', self._id, 'continue searching']))
+                    pp([
+                        now, ': Item', item, 'is not inside', self._id,
+                        'continue searching'
+                    ]))
                 succ = d.succ(self._id)
                 if succ == None:
-                    logging.error(pp([now, ':Query', query_id, 'of', d, 'reached',
-                                  self._id, 'and has nowhere to go, will be dropped']))
+                    logging.error(
+                        pp([
+                            now, ':Query', query_id, 'of', d, 'reached',
+                            self._id, 'and has nowhere to go, will be dropped'
+                        ]))
                     return []
                 e = (self._id, succ)
                 msglist.append((msg, e))
@@ -1157,44 +1499,83 @@ class LMinCache(NetworkedCache):
 
         if label == "RESPONSE":
             logging.debug(
-                pp([now, ': Response message for', d, 'received by cache', self._id]))
+                pp([
+                    now, ': Response message for', d, 'received by cache',
+                    self._id
+                ]))
             self.stats['responses'] += 1.0
             item = d.item
             #logging.debug(pp([now,': Node',self._id,'updating derivative of item',item,'with measurement',msg.stats['downweight']]))
-            # self.cache.add(item,msg.stats['downweight'],now) #does not really add item, but updates its gradient estimate
+            #self.cache.add(item,msg.stats['downweight'],now) #does not really add item, but updates its gradient estimate
             #logging.debug(pp([now,': Node',self._id,' now stores',self]))
 
             if d.query_source == self._id:
-                logging.debug(pp([now, ': Response to query', query_id,
-                              'of', d, ' finally delivered by cache', self._id]))
+                logging.debug(
+                    pp([
+                        now, ': Response to query', query_id, 'of', d,
+                        ' finally delivered by cache', self._id
+                    ]))
                 pred = d
             else:
-                logging.debug(pp([now, ': Response to query', query_id, 'of', d,
-                              'passes through cache', self._id, 'moving further down path']))
+                logging.debug(
+                    pp([
+                        now, ': Response to query', query_id, 'of', d,
+                        'passes through cache', self._id,
+                        'moving further down path'
+                    ]))
                 pred = d.pred(self._id)
             e = (self._id, pred)
             return [(msg, e)]
 
         if label == "EXPLORE":
             item = d.item
-            logging.debug(pp([now, ': Explore message for item', item, 'received by cache', self._id, 'sumsofar is %f local state is %f in permanent is %f' % (
-                msg.payload, self.cache.state(item), float(item in self.permanent_set))]))
+            logging.debug(
+                pp([
+                    now, ': Explore message for item', item,
+                    'received by cache', self._id,
+                    'sumsofar is %f local state is %f in permanent is %f' %
+                    (msg.payload, self.cache.state(item),
+                     float(item in self.permanent_set))
+                ]))
             self.stats['explores'] += 1.0
 
-            new_sum = msg.payload + \
-                self.cache.state(item) + float(item in self.permanent_set)
+			# step1: When p_k receives AGG, calculate 1 - w_{p_k p_k-1} + AGG, if <=1 set B = 1, else B = 0
+            n_prev = e[0]
+            n_curt = e[1]
+            Temp = msg.payload + 1 - self.cache._w[n_prev]
+            if Temp <= 1:
+                B_temp = 1
+            else:
+                B_temp = 0
+            self.cache.setB(d,B_temp) # msg.header[1] == d
+			# step1 done
+
+			# step2: add the value of B to n_{p_k p_k-1}
+            self.cache.AddOnScore_n(n_prev,B_temp)
+			# step2 done
+
+			# step3: 
+            new_sum = msg.payload + self.cache.state(item) + float(
+                item in self.permanent_set)
             if new_sum > 1.0 or item in self.permanent_set:
-                logging.debug(pp([now, ': Item', item, 'has aggregate state value',
-                              new_sum, 'on node', self._id, 'of demand', d]))
+                logging.debug(
+                    pp([
+                        now, ': Item', item, 'has aggregate state value',
+                        new_sum, 'on node', self._id, 'of demand', d
+                    ]))
                 pred = d.pred(self._id)
-                logging.debug(pp([now, ': Explore Response to query',
-                              query_id, 'of', d, ' generated by cache', self._id]))
+                logging.debug(
+                    pp([
+                        now, ': Explore Response to query', query_id, 'of', d,
+                        ' generated by cache', self._id
+                    ]))
                 e = (self._id, pred)
-                ermsg = ExploreResponseMessage(
-                    d, query_id, msg.explore_source, stats=msg.stats)
-
+                ermsg = ExploreResponseMessage(d,
+                                               query_id,
+                                               msg.explore_source,
+                                               stats=msg.stats)
+                ermsg.payload = 0.0
                 return [(ermsg, e)]
-
             else:
                 logging.debug(pp([now, ': Item', item, 'is has agreggate',
                               new_sum, 'at node', self._id, 'continue exploring']))
@@ -1207,46 +1588,126 @@ class LMinCache(NetworkedCache):
                 msg.payload = new_sum
                 return [(msg, e)]
 
+			# step3 done
+			# end
+
+			# original code:
+            #new_sum = msg.payload + self.cache.state(item) + float(
+            #    item in self.permanent_set)
+            #if new_sum > 1.0 or item in self.permanent_set:
+            #    logging.debug(
+            #        pp([
+            #            now, ': Item', item, 'has aggregate state value',
+            #            new_sum, 'on node', self._id, 'of demand', d
+            #        ]))
+            #    pred = d.pred(self._id)
+            #    logging.debug(
+            #        pp([
+            #            now, ': Explore Response to query', query_id, 'of', d,
+            #            ' generated by cache', self._id
+            #        ]))
+            #    e = (self._id, pred)
+            #    ermsg = ExploreResponseMessage(d,
+            #                                   query_id,
+            #                                   msg.explore_source,
+            #                                   stats=msg.stats)
+            #    return [(ermsg, e)]
+
+            #else:
+            #    logging.debug(
+            #        pp([
+            #            now, ': Item', item, 'is has agreggate', new_sum,
+            #            'at node', self._id, 'continue exploring'
+            #        ]))
+            #    succ = d.succ(self._id)
+            #    if succ == None:
+            #        logging.error(
+            #            pp([
+            #                now, ':Exploration for', query_id, 'of', d,
+            #                'reached', self._id,
+            #                'and has nowhere to go, will be dropped'
+            #            ]))
+            #        return []
+            #    e = (self._id, succ)
+            #    msg.payload = new_sum
+            #    return [(msg, e)]
+
         if label == "EXPLORE_RESPONSE":
             logging.debug(
-                pp([now, ': Explore Response message for', d, 'received by cache', self._id]))
+                pp([
+                    now, ': Explore Response message for', d,
+                    'received by cache', self._id
+                ]))
             self.stats['explore_responses'] += 1.0
             item = d.item
 
+            # setp1: for wireless case, use payload = sum of powercaps as the update of m  
             logging.debug(
-                pp([now, ': Node', self._id, 'received exploration response for', query_id, 'of', d]))
+                pp([
+                    now, ': Node', self._id,
+                    'received exploration response for', query_id, 'of', d
+                ]))
+
+			# case of wireline, aggregate downweight: 	
+            #logging.debug(pp([now, ': Node', self._id, 'updating derivative of item',
+            #        item, 'with measurement', msg.stats['downweight']]))
+            #self.cache.updateGradient(item, msg.stats['downweight'])
+
+			# case of wireless, aggregate power caps:
             logging.debug(pp([now, ': Node', self._id, 'updating derivative of item',
-                          item, 'with measurement', msg.stats['downweight']]))
-            self.cache.updateGradient(item, msg.stats['downweight'])
+                          item, 'with measurement', msg.payload]))
+            self.cache.updateGradient(item, msg.payload)
+			# step1 done
+
+			# step2: if B = 1, add payload, otherwise dont
+            if self.cache.getB(d) == 1:
+                #n_curt = e[1]
+                msg.payload += self.cache._powercap #PowerCap[n_curt]
+            # step2 done
 
             if msg.explore_source == self._id:
                 logging.debug(
-                    pp([now, ': Node', self._id, 'is terminal node for exploration response for', query_id, 'of', d]))
+                    pp([
+                        now, ': Node', self._id,
+                        'is terminal node for exploration response for',
+                        query_id, 'of', d
+                    ]))
                 #logging.debug(pp([now,': Node',self._id,' now stores',self.cache]))
                 return []
 
-            logging.debug(pp([now, ': Explore Response to query', query_id, 'of',
-                          d, 'passes through cache', self._id, 'moving further down path']))
+            logging.debug(
+                pp([
+                    now, ': Explore Response to query', query_id, 'of', d,
+                    'passes through cache', self._id,
+                    'moving further down path'
+                ]))
             pred = d.pred(self._id)
             e = (self._id, pred)
             return [(msg, e)]
+        
 
     def shuffleProcess(self):
         """A process handling messages sent to caches.
 
-           It is effectively a wrapper for a receive call, made to a NetworkedCache object. 
+	   It is effectively a wrapper for a receive call, made to a NetworkedCache object. 
 
-        """
+	"""
         while True:
             logging.debug(
                 pp([self.env.now, ': New suffling of cache', self._id]))
-            # key,placements,probs,distr=self.cache.shuffle(self.env.now)
+            #key,placements,probs,distr=self.cache.shuffle(self.env.now)
             self.cache.shuffle(self.env.now)
             logging.debug(
-                pp([self.env.now, ': New cache at', self._id, ' is', self.cache]))
+                pp([
+                    self.env.now, ': New cache at', self._id, ' is', self.cache
+                ]))
             #logging.debug('Setting cache at %d to %s, probability was:%f' %(self._id,str(self.cache),probs[key]) )
-
+            print("Cache "+str(self._id)+" shuffuled at time "+str(self.env.now))
             yield self.env.timeout(self.T)
+            
+            # update power variables of cache
+            #print("Current time = "+str(self.env.now))
+            #self.push_power()
 
     def startShuffleProcess(self, env):
         self.env = env
@@ -1256,91 +1717,164 @@ class LMinCache(NetworkedCache):
         return max(self.cache.state(item), float(item in self.permanent_set))
 
     def non_zero_state_items(self):
-        return self.cache._state.keys()+list(self.permanent_set)
+        return self.cache._state.keys() + list(self.permanent_set)
 
 
 def main():
     #logging.basicConfig(filename='execution.log', filemode='w', level=logging.INFO)
 
     parser = argparse.ArgumentParser(
-        description='Simulate a Network of Caches', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+        description='Simulate a Network of Caches',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     #parser.add_argument('inputfile',help = 'Training data. This should be a tab separated file of the form: index _tab_ features _tab_ output , where index is a number, features is a json string storing the features, and output is a json string storing output (binary) variables. See data/LR-example.txt for an example.')
     parser.add_argument('outputfile', help='Output file')
-    parser.add_argument('--max_capacity', default=2,
-                        type=int, help='Maximum capacity per cache')
-    parser.add_argument('--min_capacity', default=2,
-                        type=int, help='Minimum capacity per cache')
-    parser.add_argument('--max_weight', default=100.0,
-                        type=float, help='Maximum edge weight')
-    parser.add_argument('--min_weight', default=1.0,
-                        type=float, help='Minimum edge weight')
-    parser.add_argument('--max_rate', default=1.0,
-                        type=float, help='Maximum demand rate')
-    parser.add_argument('--min_rate', default=1.0,
-                        type=float, help='Minimum demand rate')
-    parser.add_argument('--time', default=1000.0, type=float,
+    parser.add_argument('--max_capacity',
+                        default=2,
+                        type=int,
+                        help='Maximum capacity per cache')
+    parser.add_argument('--min_capacity',
+                        default=2,
+                        type=int,
+                        help='Minimum capacity per cache')
+    parser.add_argument('--max_weight',
+                        default=100.0,
+                        type=float,
+                        help='Maximum edge weight')
+    parser.add_argument('--min_weight',
+                        default=1.0,
+                        type=float,
+                        help='Minimum edge weight')
+    parser.add_argument('--max_rate',
+                        default=1.0,
+                        type=float,
+                        help='Maximum demand rate')
+    parser.add_argument('--min_rate',
+                        default=1.0,
+                        type=float,
+                        help='Minimum demand rate')
+    parser.add_argument('--time',
+                        default=1000.0,
+                        type=float,
                         help='Total simulation duration')
-    parser.add_argument('--warmup', default=0.0, type=float,
+    parser.add_argument('--warmup',
+                        default=0.0,
+                        type=float,
                         help='Warmup time until measurements start')
-    parser.add_argument('--catalog_size', default=100,
-                        type=int, help='Catalog size')
-#   parser.add_argument('--sources_per_item',default=1,type=int, help='Number of designated sources per catalog item')
-    parser.add_argument('--demand_size', default=1000,
-                        type=int, help='Demand size')
-    parser.add_argument('--demand_change_rate', default=0.0,
-                        type=float, help='Demand change rate')
-    parser.add_argument('--demand_distribution', default="powerlaw", type=str,
-                        help='Demand distribution', choices=['powerlaw', 'uniform'])
-    parser.add_argument('--powerlaw_exp', default=1.2, type=float,
+    parser.add_argument('--catalog_size',
+                        default=100,
+                        type=int,
+                        help='Catalog size')
+    #   parser.add_argument('--sources_per_item',default=1,type=int, help='Number of designated sources per catalog item')
+    parser.add_argument('--demand_size',
+                        default=1000,
+                        type=int,
+                        help='Demand size')
+    parser.add_argument('--demand_change_rate',
+                        default=0.0,
+                        type=float,
+                        help='Demand change rate')
+    parser.add_argument('--demand_distribution',
+                        default="powerlaw",
+                        type=str,
+                        help='Demand distribution',
+                        choices=['powerlaw', 'uniform'])
+    parser.add_argument('--powerlaw_exp',
+                        default=1.2,
+                        type=float,
                         help='Power law exponent, used in demand distribution')
-    parser.add_argument('--query_nodes', default=100, type=int,
+    parser.add_argument('--query_nodes',
+                        default=100,
+                        type=int,
                         help='Number of nodes generating queries')
-    parser.add_argument('--graph_type', default="erdos_renyi", type=str, help='Graph type', choices=['erdos_renyi', 'balanced_tree', 'hypercube', "cicular_ladder", "cycle", "grid_2d",
-                        'lollipop', 'expander', 'hypercube', 'star', 'barabasi_albert', 'watts_strogatz', 'regular', 'powerlaw_tree', 'small_world', 'geant', 'abilene', 'dtelekom', 'servicenetwork', 'hetnet'])
-    parser.add_argument('--graph_size', default=100,
-                        type=int, help='Network size')
-    parser.add_argument('--hetnet_params', default=(10,3,3,3),
-                        type=int, help='Hetnet parameters as tuple (V,SC,R_cell,pathloss_exp). Ex: (10,3,3,3)')
-    parser.add_argument('--graph_degree', default=4, type=int,
-                        help='Degree. Used by balanced_tree, regular, barabasi_albert, watts_strogatz')
-    parser.add_argument('--graph_p', default=0.10, type=int,
-                        help='Probability, used in erdos_renyi, watts_strogatz')
-    parser.add_argument('--random_seed', default=123456789,
-                        type=int, help='Random seed')
-    parser.add_argument('--debug_level', default='INFO', type=str,
-                        help='Debug Level', choices=['INFO', 'DEBUG', 'WARNING', 'ERROR'])
-    parser.add_argument('--cache_type', default='LRU', type=str, help='Networked Cache type',
-                        choices=['LRU', 'FIFO', 'LFU', 'RR', 'EWMAGRAD', 'LMIN'])
-#   parser.add_argument('--cache_keyword_parameters',default='{}',type=str,help='Networked Cache additional constructor parameters')
-    parser.add_argument('--query_message_length', default=0.0,
-                        type=float, help='Query message length')
-    parser.add_argument('--response_message_length', default=0.0,
-                        type=float, help='Response message length')
-    parser.add_argument('--monitoring_rate', default=1.0,
-                        type=float, help='Monitoring rate')
-    parser.add_argument('--interpolate', default=False,
-                        type=bool, help='Interpolate past states, used by LMIN')
-    parser.add_argument('--beta', default=1.0, type=float,
+    parser.add_argument('--graph_type',
+                        default="erdos_renyi",
+                        type=str,
+                        help='Graph type',
+                        choices=[
+                            'erdos_renyi', 'balanced_tree', 'hypercube',
+                            "cicular_ladder", "cycle", "grid_2d", 'lollipop',
+                            'expander', 'hypercube', 'star', 'barabasi_albert',
+                            'watts_strogatz', 'regular', 'powerlaw_tree',
+                            'small_world', 'geant', 'abilene', 'dtelekom',
+                            'servicenetwork'
+                        ])
+    parser.add_argument('--graph_size',
+                        default=100,
+                        type=int,
+                        help='Network size')
+    parser.add_argument(
+        '--graph_degree',
+        default=4,
+        type=int,
+        help=
+        'Degree. Used by balanced_tree, regular, barabasi_albert, watts_strogatz'
+    )
+    parser.add_argument(
+        '--graph_p',
+        default=0.10,
+        type=int,
+        help='Probability, used in erdos_renyi, watts_strogatz')
+    parser.add_argument('--random_seed',
+                        default=123456789,
+                        type=int,
+                        help='Random seed')
+    parser.add_argument('--debug_level',
+                        default='INFO',
+                        type=str,
+                        help='Debug Level',
+                        choices=['INFO', 'DEBUG', 'WARNING', 'ERROR'])
+    parser.add_argument(
+        '--cache_type',
+        default='LRU',
+        type=str,
+        help='Networked Cache type',
+        choices=['LRU', 'FIFO', 'LFU', 'RR', 'EWMAGRAD', 'LMIN'])
+    #   parser.add_argument('--cache_keyword_parameters',default='{}',type=str,help='Networked Cache additional constructor parameters')
+    parser.add_argument('--query_message_length',
+                        default=0.0,
+                        type=float,
+                        help='Query message length')
+    parser.add_argument('--response_message_length',
+                        default=0.0,
+                        type=float,
+                        help='Response message length')
+    parser.add_argument('--monitoring_rate',
+                        default=1.0,
+                        type=float,
+                        help='Monitoring rate')
+    parser.add_argument('--interpolate',
+                        default=False,
+                        type=bool,
+                        help='Interpolate past states, used by LMIN')
+    parser.add_argument('--beta',
+                        default=1.0,
+                        type=float,
                         help='beta used in EWMA')
-    parser.add_argument('--gamma', default=0.1, type=float,
+    parser.add_argument('--gamma',
+                        default=0.1,
+                        type=float,
                         help='gamma used in LMIN')
-    parser.add_argument('--expon', default=0.5, type=float,
+    parser.add_argument('--expon',
+                        default=0.5,
+                        type=float,
                         help='exponent used in LMIN')
-    parser.add_argument('--T', default=5., type=float,
+    parser.add_argument('--T',
+                        default=5.,
+                        type=float,
                         help='Suffling period used in LMIN')
     args = parser.parse_args()
 
-    args.debug_level = eval("logging."+args.debug_level)
+    args.debug_level = eval("logging." + args.debug_level)
 
     def graphGenerator():
         if args.graph_type == "erdos_renyi":
             return networkx.erdos_renyi_graph(args.graph_size, args.graph_p)
         if args.graph_type == "balanced_tree":
-            ndim = int(np.ceil(np.log(args.graph_size) /
-                       np.log(args.graph_degree)))
+            ndim = int(
+                np.ceil(np.log(args.graph_size) / np.log(args.graph_degree)))
             return networkx.balanced_tree(args.graph_degree, ndim)
         if args.graph_type == "cicular_ladder":
-            ndim = int(np.ceil(args.graph_size*0.5))
+            ndim = int(np.ceil(args.graph_size * 0.5))
             return networkx.circular_ladder_graph(ndim)
         if args.graph_type == "cycle":
             return networkx.cycle_graph(args.graph_size)
@@ -1348,23 +1882,26 @@ def main():
             ndim = int(np.ceil(np.sqrt(args.graph_size)))
             return networkx.grid_2d_graph(ndim, ndim)
         if args.graph_type == 'lollipop':
-            ndim = int(np.ceil(args.graph_size*0.5))
+            ndim = int(np.ceil(args.graph_size * 0.5))
             return networkx.lollipop_graph(ndim, ndim)
         if args.graph_type == 'expander':
             ndim = int(np.ceil(np.sqrt(args.graph_size)))
             return networkx.margulis_gabber_galil_graph(ndim)
         if args.graph_type == "hypercube":
-            ndim = int(np.ceil(np.log(args.graph_size)/np.log(2.0)))
+            ndim = int(np.ceil(np.log(args.graph_size) / np.log(2.0)))
             return networkx.hypercube_graph(ndim)
         if args.graph_type == "star":
-            ndim = args.graph_size-1
+            ndim = args.graph_size - 1
             return networkx.star_graph(ndim)
         if args.graph_type == 'barabasi_albert':
-            return networkx.barabasi_albert_graph(args.graph_size, args.graph_degree)
+            return networkx.barabasi_albert_graph(args.graph_size,
+                                                  args.graph_degree)
         if args.graph_type == 'watts_strogatz':
-            return networkx.connected_watts_strogatz_graph(args.graph_size, args.graph_degree, args.graph_p)
+            return networkx.connected_watts_strogatz_graph(
+                args.graph_size, args.graph_degree, args.graph_p)
         if args.graph_type == 'regular':
-            return networkx.random_regular_graph(args.graph_degree, args.graph_size)
+            return networkx.random_regular_graph(args.graph_degree,
+                                                 args.graph_size)
         if args.graph_type == 'powerlaw_tree':
             return networkx.random_powerlaw_tree(args.graph_size)
         if args.graph_type == 'small_world':
@@ -1378,8 +1915,6 @@ def main():
             return topologies.Abilene()
         if args.graph_type == 'servicenetwork':
             return topologies.ServiceNetwork()
-        if args.graph_type == 'hetnet':
-            return topologies.HetNet(args.hetnet_params)
 
     def cacheGenerator(capacity, _id):
         if args.cache_type == 'LRU':
@@ -1393,11 +1928,16 @@ def main():
         if args.cache_type == 'EWMAGRAD':
             return EWMAGradCache(capacity, _id, beta=args.beta)
         if args.cache_type == 'LMIN':
-            return LMinCache(capacity, _id, gamma=args.beta, T=args.T, expon=args.expon, interpolate=args.interpolate)
+            return LMinCache(capacity,
+                             _id,
+                             gamma=args.beta,
+                             T=args.T,
+                             expon=args.expon,
+                             interpolate=args.interpolate)
 
     logging.basicConfig(level=args.debug_level)
     random.seed(args.random_seed)
-    np.random.seed(args.random_seed+2015)
+    np.random.seed(args.random_seed + 2015)
 
     CONFIG.QUERY_MESSAGE_LENGTH = args.query_message_length
     CONFIG.RESPONSE_MESSAGE_LENGTH = args.response_message_length
@@ -1406,37 +1946,33 @@ def main():
 
     logging.info('Generating graph and weights...')
     temp_graph = graphGenerator()
-    # networkx.draw(temp_graph)
-    # plt.draw()
-    logging.debug('nodes: '+str(temp_graph.nodes()))
-    logging.debug('edges: '+str(temp_graph.edges()))
+    #networkx.draw(temp_graph)
+    #plt.draw()
+    logging.debug('nodes: ' + str(temp_graph.nodes()))
+    logging.debug('edges: ' + str(temp_graph.edges()))
     G = DiGraph()
 
     number_map = dict(zip(temp_graph.nodes(), range(len(temp_graph.nodes()))))
     G.add_nodes_from(number_map.values())
     weights = {}
-    if args.graph_type == 'hetnet':
-        gains = {}
     for (x, y) in temp_graph.edges():
         xx = number_map[x]
         yy = number_map[y]
         G.add_edges_from(((xx, yy), (yy, xx)))
         weights[(xx, yy)] = random.uniform(args.min_weight, args.max_weight)
         weights[(yy, xx)] = weights[(xx, yy)]
-        if args.graph_type == 'hetnet':
-            gains[(xx, yy)] = G.edges[xx, yy]['gain'] # Will be necessary for power calculations for HetNet case
-            gains[(yy, xx)] = gains[(xx, yy)]
     graph_size = G.number_of_nodes()
     edge_size = G.number_of_edges()
     logging.info('...done. Created graph with %d nodes and %d edges' %
                  (graph_size, edge_size))
-    logging.debug('G is:'+str(G.nodes())+str(G.edges()))
+    logging.debug('G is:' + str(G.nodes()) + str(G.edges()))
     construct_stats['graph_size'] = graph_size
     construct_stats['edge_size'] = edge_size
 
     logging.info('Generating item sources...')
-    item_sources = dict((item, [list(G.nodes())[source]]) for item, source in zip(range(
-        args.catalog_size), np.random.choice(range(graph_size), args.catalog_size)))
+    item_sources = dict((item, [G.nodes()[source]]) for item, source in zip(
+        range(args.catalog_size),
+        np.random.choice(range(graph_size), args.catalog_size)))
     logging.info('...done. Generated %d sources' % len(item_sources))
     logging.debug('Generated sources:')
     for item in item_sources:
@@ -1445,26 +1981,26 @@ def main():
     construct_stats['sources'] = len(item_sources)
 
     logging.info('Generating query node list...')
-    if args.graph_type == 'hetnet':
-        query_node_list = [list(G.nodes())[i] for i in range(args.hetnet_params[1]+1, args.hetnet_params[0])] # User nodes are query nodes for HetNet
-    else:
-        query_node_list = [list(G.nodes())[i] for i in random.sample(
-            range(graph_size), args.query_nodes)]
+    query_node_list = [
+        G.nodes()[i]
+        for i in random.sample(xrange(graph_size), args.query_nodes)
+    ]
     logging.info('...done. Generated %d query nodes.' % len(query_node_list))
 
     construct_stats['query_nodes'] = len(query_node_list)
 
     logging.info('Generating demands...')
     if args.demand_distribution == 'powerlaw':
-        def factor(i): return (1.0+i)**(-args.powerlaw_exp)
+        factor = lambda i: (1.0 + i)**(-args.powerlaw_exp)
     else:
-        def factor(i): return 1.0
+        factor = lambda i: 1.0
     pmf = np.array([factor(i) for i in range(args.catalog_size)])
     pmf /= sum(pmf)
     distr = rv_discrete(values=(range(args.catalog_size), pmf))
     if args.catalog_size < args.demand_size:
-        items_requested = list(distr.rvs(
-            size=(args.demand_size-args.catalog_size))) + list(range(args.catalog_size))
+        items_requested = list(
+            distr.rvs(size=(args.demand_size - args.catalog_size))) + range(
+                args.catalog_size)
     else:
         items_requested = list(distr.rvs(size=args.demand_size))
 
@@ -1476,38 +2012,45 @@ def main():
     for x in query_node_list:
         dem = demands_per_query_node
         if x < remainder:
-            dem = dem+1
-        if args.graph_type == 'hetnet':
-            new_dems = [Demand(items_requested[pos], shortest_path(G, x, "nodeMC", weight='cost'), # For HetNet shortest path depends on link costs and is always routed to MC
-                           random.uniform(args.min_rate, args.max_rate)) for pos in range(len(demands), len(demands)+dem)]
-        else:
-            new_dems = [Demand(items_requested[pos], shortest_path(G, x, item_sources[items_requested[pos]][0], weight='weight'),
-                           random.uniform(args.min_rate, args.max_rate)) for pos in range(len(demands), len(demands)+dem)]
+            dem = dem + 1
+
+        new_dems = [
+            Demand(
+                items_requested[pos],
+                shortest_path(G,
+                              x,
+                              item_sources[items_requested[pos]][0],
+                              weight='weight'),
+                random.uniform(args.min_rate, args.max_rate))
+            for pos in range(len(demands),
+                             len(demands) + dem)
+        ]
         logging.debug(pp(new_dems))
         demands = demands + new_dems
 
     logging.info('...done. Generated %d demands' % len(demands))
     #plt.hist([ d.item for d in demands], bins=np.arange(args.catalog_size)+0.5)
-    # plt.show()
- 
+    #plt.show()
+
     construct_stats['demands'] = len(demands)
 
     logging.info('Generating capacities...')
-    capacities = dict((x, random.randint(args.min_capacity,
-                      args.max_capacity)) for x in G.nodes())
+    capacities = dict((x, random.randint(args.min_capacity, args.max_capacity))
+                      for x in G.nodes())
     logging.info('...done. Generated %d caches' % len(capacities))
     logging.debug('Generated capacities:')
     for key in capacities:
         logging.debug(pp([key, ':', capacities[key]]))
 
     logging.info('Building CacheNetwork')
-    cnx = CacheNetwork(G, cacheGenerator, demands, item_sources, capacities, weights, weights,
-                       args.warmup, args.monitoring_rate, args.demand_change_rate, args.min_rate, args.max_rate)
+    cnx = CacheNetwork(G, cacheGenerator, demands, item_sources, capacities,
+                       weights, weights, args.T, args.warmup, args.monitoring_rate,
+                       args.demand_change_rate, args.min_rate, args.max_rate)
     logging.info('...done')
 
     Y, res = cnx.minimizeRelaxation()
 
-    logging.info('Optimal Relaxation is: '+str(cnx.relaxation(Y)))
+    logging.info('Optimal Relaxation is: ' + str(cnx.relaxation(Y)))
     logging.info('Expected caching gain at relaxation point is: ' +
                  str(cnx.expected_caching_gain(Y)))
 
@@ -1541,12 +2084,17 @@ def main():
     network_stats['fun'] = cnx.funstats
     network_stats['opt'] = cnx.optstats
 
-    out = args.outputfile+"%s_%s_%ditems_%dnodes_%dquerynodes_%ddemands_%ftime_%fchange_%fgamma_%fexpon%fbeta" % (
-        args.graph_type, args.cache_type, args.catalog_size, args.graph_size, args.query_nodes, args.demand_size, args.time, args.demand_change_rate, args.gamma, args.expon, args.beta)
+    out = args.outputfile + "%s_%s_%ditems_%dnodes_%dquerynodes_%ddemands_%ftime_%fchange_%fgamma_%fexpon%fbeta" % (
+        args.graph_type, args.cache_type, args.catalog_size, args.graph_size,
+        args.query_nodes, args.demand_size, args.time, args.demand_change_rate,
+        args.gamma, args.expon, args.beta)
 
     with open(out, 'wb') as f:
-        pickle.dump([args, construct_stats, optimal_stats,
-                    demand_stats, node_stats, network_stats], f)
+        pickle.dump([
+            args, construct_stats, optimal_stats, demand_stats, node_stats,
+            network_stats
+        ], f)
+
 
 #   for d in cnx.demands:
 #	print d.item, d.rate, d.requests_tally.count()/time, len(d.path), d.hops_tally.mean(), d.weight_tally.mean(), d.time_tally.mean(), d.hit_source_tally.mean()
@@ -1555,14 +2103,13 @@ def main():
 #	cache = cnx.node[x]['cache']
 #	print x,cache.queries_tally.count(), cache.hits_tally.mean(), cache.downloads_tally.count()/time
 
-# def plot_ecdf(y,x_label):
+#def plot_ecdf(y,x_label):
 #     ecdf = ECDF(y)
 #     x= sorted(list(set(y)))
 #     plt.plot(x,ecdf(x))
 #     plt.xlabel(x_label)
 #     plt.ylabel('CDF')
 #     plt.show()
-
 
 if __name__ == "__main__":
     main()

@@ -14,16 +14,16 @@ from helpers import projectToSimplex, constructDistribution
 
 def addDictionaries(d1, d2):
     """
-    Add the elements of two dictionaries. Missing entries treated as zero.
-    """
-    lsum = [(key, d1[key]+d2[key]) for key in d1 if key in d2]
+	Add the elements of two dictionaries. Missing entries treated as zero.
+	"""
+    lsum = [(key, d1[key] + d2[key]) for key in d1 if key in d2]
     lsum += [(key, d1[key]) for key in d1 if key not in d2]
     lsum += [(key, d2[key]) for key in d2 if key not in d1]
     return dict(lsum)
 
 
 def scaleDictionary(d, s):
-    return dict([(key, s*d[key]) for key in d])
+    return dict([(key, s * d[key]) for key in d])
 
 
 def dictL1(d):
@@ -31,7 +31,7 @@ def dictL1(d):
 
 
 def dictL2(d):
-    return np.sqrt(sum((x*x for x in d.values())))
+    return np.sqrt(sum((x * x for x in d.values())))
 
 
 class Cache:
@@ -40,7 +40,7 @@ class Cache:
     An abstract cache object is determined by a capacity (integer) and an id, used to identify the cache. The cache contents are represented as a set
 
     Attributes:
-        _id : the unique cache id
+    	_id : the unique cache id
         _capacity: the cache size
         _contents: the set containing the cache contents
     """
@@ -49,15 +49,15 @@ class Cache:
 
     def __init__(self, capacity, _id):
         """ Initialize an empty cache with given capacity and id.
-        """
+	"""
         self._id = _id
         self._capacity = capacity
         self._contents = set([])
 
     def __str__(self):
         """String representation.
-        """
-        return str(self._id) + ":" + str(self._contents)
+	"""
+        return ` self._id ` + ":" + str(self._contents)
 
     # Storage Operations
     def __len__(self):
@@ -87,7 +87,6 @@ class Cache:
 
 class PriorityCache(Cache):
     ''' A priority cache. It can be used to implement LRU (priority=time accessed) and LFU (priority = number of accesses).  '''
-
     def __init__(self, capacity, _id):
         Cache.__init__(self, capacity, _id)
         self._contents = PriorityStruct()
@@ -100,16 +99,18 @@ class PriorityCache(Cache):
             self._contents.insert(item, priority)
             return None
         else:
-            # warning: item inserted will be popped if it is the lowest priority element
-            return self._contents.insert_pop(item, priority)
+            return self._contents.insert_pop(
+                item, priority
+            )  #warning: item inserted will be popped if it is the lowest priority element
 
     def add_pop_if_needed(self, item, priority=float("-inf")):
         if len(self) < self._capacity or item in self:
             self._contents.insert(item, priority)
             return None
         else:
-            # warning: item inserted will be added even if it is the lowest priority element
-            return self._contents.pop_insert(item, priority)
+            return self._contents.pop_insert(
+                item, priority
+            )  #warning: item inserted will be added even if it is the lowest priority element
 
     def remove(self, item):
         return self._contents.remove(item)
@@ -123,10 +124,9 @@ class PriorityCache(Cache):
 
 class EWMACache(Cache):
     """ An EWMA cache object """
-
     def __init__(self, capacity, _id, beta):
         """ Initialize an empty cache with given capacity and id.
-        """
+	"""
         self._id = _id
         self._capacity = capacity
         self._beta = beta
@@ -134,8 +134,9 @@ class EWMACache(Cache):
 
     def __str__(self):
         """String representation.
-        """
-        return str(self._id) + '(' + str(self._capacity) + '):' + str(self._ewma.topK(self._capacity)) + 'EWMA: ' + str(self._ewma)
+	"""
+        return ` self._id ` + '(' + ` self._capacity ` + '):' + str(
+            self._ewma.topK(self._capacity)) + 'EWMA: ' + str(self._ewma)
 
     def __len__(self):
         return min(len(self.ewma), self._capacity)
@@ -146,7 +147,8 @@ class EWMACache(Cache):
     def __iter__(self):
         return self._ewma.topK(self._capacity).__iter__()
 
-    def add(self, item, value, time):  # THIS DOES NOT REALLY ADD AN ITEM, IT UPDATES ITS EWMA ESTIMATE
+    def add(self, item, value, time
+            ):  #THIS DOES NOT REALLY ADD AN ITEM, IT UPDATES ITS EWMA ESTIMATE
         self._ewma.add(item, value, time)
 
     def remove(self, item):
@@ -159,10 +161,9 @@ class EWMACache(Cache):
 
 class LMinimalCache(Cache):
     """ A cache that minimizes the relaxation L. """
-
     def __init__(self, capacity, _id, gamma=0.1, expon=0.5, interpolate=False):
         """ Initialize an empty cache with given capacity and id.
-        """
+	"""
         self._id = _id
         self._capacity = capacity
         self._gamma = gamma
@@ -174,11 +175,17 @@ class LMinimalCache(Cache):
         self._last_shuffle_time = 0.0
         self._cache = set()
         self._k = 0
+        self._B = {}  # variable B_{f,p}(v) for explore message processing
+        self._Score_n = {}  # score n_{v,u} for all out-going in-path u
+        self._w = {} # transmitting power frac
+        self._powercap = {} # transmitting power cap
+        #self._w_gradient = {} # current estimated gradient of w
 
     def __str__(self):
         """String representation.
-        """
-        return str(self._id)+ '(' + str(self._capacity) + '):' + str(self._cache)
+	"""
+        return ` self._id ` + '(' + ` self._capacity ` + '):' + str(
+            self._cache)
 
     def __len__(self):
         return len(self._cache)
@@ -206,58 +213,77 @@ class LMinimalCache(Cache):
         sum_so_far = 0.0
         dict_so_far = {}
 
-        for ell in range(int(np.ceil(k*0.5)), k):
-            gain = self._gamma*(ell ** (-self._expon))
+        for ell in range(int(np.ceil(k * 0.5)), k):
+            gain = self._gamma * (ell**(-self._expon))
             dict_so_far = addDictionaries(
                 dict_so_far, scaleDictionary(self._past_states[ell], gain))
             sum_so_far += gain
 
-        return scaleDictionary(dict_so_far, 1.0/sum_so_far)
+        return scaleDictionary(dict_so_far, 1.0 / sum_so_far)
 
     def updateGradient(self, item, value):
         if item in self._grad:
             self._grad[item] += value
         else:
             self._grad[item] = value
-        # print self._grad[item]
+        #print self._grad[item]
+
+    def setB(self, demand_d, B_value):  # set specific B value
+        if demand_d in self._B.keys():
+            self._B[demand_d] = B_value
+        else:
+            self._B[demand_d] = B_value
+
+    def getB(self, demand_d):  # read specific B value
+        if demand_d in self._B.keys():
+            return self._B[demand_d]
+        else:
+            return 0
+
+    def AddOnScore_n(self, receive_node, n_AddOnValue
+                ):  # update score n that used for power gradient est
+        if receive_node in self._Score_n:
+            self._Score_n[receive_node] += n_AddOnValue
+        else:
+            self._Score_n[receive_node] = n_AddOnValue
 
     def shuffle(self, time):
         T = time - self._last_shuffle_time
-        # print "Time passed", T
-        k = self._k+1
+        #print "Time passed", T
+        k = self._k + 1
 
-        # print "About to update state:", self._state,
-        # print "with grad",self._grad
+        #print "About to update state:", self._state,
+        #print "with grad",self._grad
         if T > 0.0:
-            self._grad = scaleDictionary(self._grad, 1.0/T)
+            self._grad = scaleDictionary(self._grad, 1.0 / T)
 
-        if dictL2(self._grad) > 100*self._capacity:
-            rescale = scaleDictionary(self._grad, 1.0/dictL2(self._grad))
+        if dictL2(self._grad) > 100 * self._capacity:
+            rescale = scaleDictionary(self._grad, 1.0 / dictL2(self._grad))
         else:
             rescale = self._grad
 
         for item in rescale:
             if item in self._state:
-                self._state[item] += self._gamma * \
-                    (k ** (-self._expon)) * rescale[item]
+                self._state[item] += self._gamma * (k**(
+                    -self._expon)) * rescale[item]
             else:
-                self._state[item] = self._gamma * \
-                    (k ** (-self._expon)) * rescale[item]
+                self._state[item] = self._gamma * (k**(
+                    -self._expon)) * rescale[item]
 
         if self._state == {} or self._state == None:
             return
-        # print "After grad", self._state, 'now will project'
+        #print "After grad", self._state, 'now will project'
 
         # Project. Solution maybe approximate, may have negative values, etc.
         self._state, res = projectToSimplex(self._state, self._capacity)
-        # print "After projection ",self._state,"now will clean up"
+        #print "After projection ",self._state,"now will clean up"
 
-        # cleanup, make kosher
-        # print "Cleaning up",
-        self._state = dict([(x, min(self._state[x], 1.0))
-                           for x in self._state if self._state[x] > 1.e-18])
+        #cleanup, make kosher
+        #print "Cleaning up",
+        self._state = dict([(x, min(self._state[x], 1.0)) for x in self._state
+                            if self._state[x] > 1.e-18])
 
-        # print "After cleanup:",self._state
+        #print "After cleanup:",self._state
 
         self._past_states[k] = dict(self._state)
 
@@ -266,16 +292,15 @@ class LMinimalCache(Cache):
         else:
             sliding_average = dict(self._state)
 
-        # print k, dictL1(self._state),dictL1(sliding_average),dictL2(self._grad)
+        #print k, dictL1(self._state),dictL1(sliding_average),dictL2(self._grad)
 
-        # if dictL1(sliding_average)>self._capacity:
+        #if dictL1(sliding_average)>self._capacity:
         #     print self._past_states
-        # print "state:",self._state
-        # print "sliding:",sliding_average
-        # print "past:",self._past_states
-
-        placements, probs, distr = constructDistribution(
-            sliding_average, self._capacity)
+        #print "state:",self._state
+        #print "sliding:",sliding_average
+        #print "past:",self._past_states
+        #print("\nsliding_average:",sliding_average)
+        placements, probs, distr = constructDistribution(sliding_average, self._capacity)
 
         u = random.random()
         sumsofar = 0.0
@@ -285,14 +310,23 @@ class LMinimalCache(Cache):
             if sumsofar >= u:
                 break
         #key = distr.rvs(size=1)[0]
-        # print key
+        #print key
 
         self._cache = set(placements[key])
-        # print self._cache, placements, probs
+        #print self._cache, placements, probs
+
+		# update power variable for wireless
+        #global PowerFrac
+        #self._w = PowerFrac[self._id]
+        
+        # time slot average for power variable subgradient
 
         self._k = k
         self._grad = {}
+        #self._Score_n = {}
         self._last_shuffle_time = time
+        #print("** Node: " + str(self._id) + ", cache state: "+str(self._state))
+        #print("power state subgradient:" + str(self._w_gradient))
 
     def state(self, item):
 
@@ -324,4 +358,4 @@ if __name__ == "__main__":
     cache.shuffle(1.0)
 
     for i in cache:
-        print(i)
+        print i

@@ -81,7 +81,7 @@ def constructDistribution(d, cap):
         prob[i] = 1.*diff/intdist
         placements[i] = x
 
-    totsum = np.sum(prob.values())
+    totsum = np.sum(list(prob.values()))
     if not np.allclose(totsum, 1):
         for i in prob:
             prob[i] = 1.*prob[i]/totsum
@@ -89,6 +89,6 @@ def constructDistribution(d, cap):
 
     #    print "Placements ",placements,"with prob",prob,"summing to",np.sum(prob.values())
 
-    return placements, prob, rv_discrete(values=(prob.keys(), prob.values()))
+    return placements, prob, rv_discrete(values=(list(prob.keys()), list(prob.values())))
 
     

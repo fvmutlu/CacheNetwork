@@ -1,6 +1,6 @@
 #! /usr/bin/env python
 '''
-	A Cache Network
+    A Cache Network
 '''
 from abc import ABCMeta, abstractmethod
 from Caches import PriorityCache, EWMACache, LMinimalCache
@@ -255,9 +255,9 @@ class CacheNetwork(DiGraph):
         
         # Identify the edges that used in a path
         for e in self.edges():
-			v = e[0]
-			u = e[1]
-			self.edge[v][u]['is_in_path'] = 0
+            v = e[0]
+            u = e[1]
+            self.edge[v][u]['is_in_path'] = 0
 
         for d in self.demands:
             path_d = d.path
@@ -277,12 +277,12 @@ class CacheNetwork(DiGraph):
         
         # Count outgoing in-path edges
         for v in self.nodes():
-			self.node[v]['out_paths'] = 0
+            self.node[v]['out_paths'] = 0
         for e in self.edges():
-			v = e[0]
-			u = e[1]
-			if self.edge[v][u]['is_in_path'] == 1:
-				self.node[v]['out_paths'] += 1
+            v = e[0]
+            u = e[1]
+            if self.edge[v][u]['is_in_path'] == 1:
+                self.node[v]['out_paths'] += 1
         
         # WirelessGain is derived from edge ['gain']
         for v in self.nodes():
@@ -296,20 +296,20 @@ class CacheNetwork(DiGraph):
                     self.PowerFrac[v][u] = 0
         
         # Initially, evenly distributed power to out-paths
-		for v in self.nodes():
-			self.PowerFrac[v] = {}
-			for u in self.nodes():
-				if (v,u) in self.edges() and self.edge[v][u]['is_in_path'] == 1:
-					self.PowerFrac[v][u] = self.PowerCap[v] / self.node[v]['out_paths']
-				else:
-					self.PowerFrac[v][u] = 0
-		for e in self.edges():
-			v = e[0]
-			u = e[1]
-			self.edge[v][u]['power'] = self.PowerCap[v] * self.PowerFrac[v][u]
-			#self.edge[v][u]['gain'] = gains[e]
-			self.edge[v][u]['gain'] = 1.0 # temp setting
-			self.WirelessGain[v][u] = 1.0
+        for v in self.nodes():
+            self.PowerFrac[v] = {}
+            for u in self.nodes():
+                if (v,u) in self.edges() and self.edge[v][u]['is_in_path'] == 1:
+                    self.PowerFrac[v][u] = self.PowerCap[v] / self.node[v]['out_paths']
+                else:
+                    self.PowerFrac[v][u] = 0
+        for e in self.edges():
+            v = e[0]
+            u = e[1]
+            self.edge[v][u]['power'] = self.PowerCap[v] * self.PowerFrac[v][u]
+            #self.edge[v][u]['gain'] = gains[e]
+            self.edge[v][u]['gain'] = 1.0 # temp setting
+            self.WirelessGain[v][u] = 1.0
 
         # Push power to each node
         self.push_power ()
@@ -1425,7 +1425,9 @@ def main():
     parser.add_argument('--graph_size', default=100,
                         type=int, help='Network size')
     parser.add_argument('--hetnet_params', nargs='+', default=[10,3,10,0.1,3,3],
-                        type=int, help='Hetnet parameters as tuple (V,SC,power_max,sinr,R_cell,pathloss_exp). Ex: 10 3 10 0.1 3 3')
+                        type=int, help='Hetnet parameters as tuple (V,SC,R_cell,pathloss_exp). Ex: 10 3 10 0.1 3 3')
+    parser.add_argument('--wireless_consts', nargs='+', default=[10.0,0.1],
+                        type=float, help='Constraints for wireless case as tuple (max_power,sinr). Ex: 10.0 0.1')
     parser.add_argument('--graph_degree', default=4, type=int,
                         help='Degree. Used by balanced_tree, regular, barabasi_albert, watts_strogatz')
     parser.add_argument('--graph_p', default=0.10, type=int,
@@ -1634,7 +1636,7 @@ def main():
     cnx = CacheNetwork(G, cacheGenerator, demands, item_sources, capacities, weights, weights,
                        args.warmup, args.monitoring_rate, args.demand_change_rate, args.min_rate, args.max_rate) # This initializes a random process for link delays based on weights, it will be different for HetNet
     if args.graph_type == 'hetnet':
-        cnx.initWireless(args.T, args.hetnet_params[0], args.hetnet_params[1], gains, args.hetnet_params[2], args.hetnet_params[3]) # For HetNet we have to initialize wireless parameters, currently only gains need to be passed, sinr_min/max, power_max and noise can also be set
+        cnx.initWireless(args.T, *(args.hetnet_params[0:1]), gains, *args.wireless_consts) # For HetNet we have to initialize wireless parameters, currently only gains need to be passed, sinr_min/max, power_max and noise can also be set
     logging.info('...done')
 
     Y, res = cnx.minimizeRelaxation()

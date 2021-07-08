@@ -1424,10 +1424,13 @@ def main():
                         'lollipop', 'expander', 'hypercube', 'star', 'barabasi_albert', 'watts_strogatz', 'regular', 'powerlaw_tree', 'small_world', 'geant', 'abilene', 'dtelekom', 'servicenetwork', 'hetnet'])
     parser.add_argument('--graph_size', default=100,
                         type=int, help='Network size')
-    parser.add_argument('--hetnet_params', nargs='+', default=[10,3,10,0.1,3,3],
-                        type=int, help='Hetnet parameters as tuple (V,SC,R_cell,pathloss_exp). Ex: 10 3 10 0.1 3 3')
+    
+    parser.add_argument('--hetnet_params', nargs='+', default=[5.0,3.0,3.0],
+                        type=float, help='Hetnet parameters as tuple (SC,R_cell,pathloss_exp). Default ex: 3 3 3')
     parser.add_argument('--wireless_consts', nargs='+', default=[10.0,0.1],
                         type=float, help='Constraints for wireless case as tuple (max_power,sinr). Ex: 10.0 0.1')
+    parser.add_argument('--hetnet_load', type=str, help='Path to hetnet topology file')
+    
     parser.add_argument('--graph_degree', default=4, type=int,
                         help='Degree. Used by balanced_tree, regular, barabasi_albert, watts_strogatz')
     parser.add_argument('--graph_p', default=0.10, type=int,
@@ -1506,7 +1509,10 @@ def main():
         if args.graph_type == 'servicenetwork':
             return topologies.ServiceNetwork()
         if args.graph_type == 'hetnet':
-            return topologies.HetNet(*args.hetnet_params)
+            if args.hetnet_load is not None:
+                return topologies.LoadHetNet(args.hetnet_load)
+            else:
+                return topologies.HetNet(args.graph_size, int(args.hetnet_params[0]), args.hetnet_params[1], args.hetnet_params[2])
 
     def cacheGenerator(capacity, _id):
         if args.cache_type == 'LRU':
@@ -1567,7 +1573,6 @@ def main():
     else:
         item_sources = dict((item, [list(G.nodes())[source]]) for item, source in zip(range(
             args.catalog_size), np.random.choice(range(graph_size), args.catalog_size)))
-    print(item_sources)
     logging.info('...done. Generated %d sources' % len(item_sources))
     logging.debug('Generated sources:')
     for item in item_sources:
@@ -1577,7 +1582,7 @@ def main():
 
     logging.info('Generating query node list...')
     if args.graph_type == 'hetnet':
-        query_node_list = [list(G.nodes())[i] for i in range(args.hetnet_params[1]+1, args.hetnet_params[0])] # User nodes are query nodes for HetNet
+        query_node_list = [list(G.nodes())[i] for i in range(len(G.nodes()) - args.query_nodes, len(G.nodes()))] # User nodes are query nodes for HetNet
     else:
         query_node_list = [list(G.nodes())[i] for i in random.sample(
             range(graph_size), args.query_nodes)]
@@ -1604,7 +1609,6 @@ def main():
     demands_per_query_node = args.demand_size // args.query_nodes
     remainder = args.demand_size % args.query_nodes
     demands = []
-    print(query_node_list)
     for i, x in enumerate(query_node_list):
         dem = demands_per_query_node
         if i < remainder:
@@ -1636,7 +1640,7 @@ def main():
     cnx = CacheNetwork(G, cacheGenerator, demands, item_sources, capacities, weights, weights,
                        args.warmup, args.monitoring_rate, args.demand_change_rate, args.min_rate, args.max_rate) # This initializes a random process for link delays based on weights, it will be different for HetNet
     if args.graph_type == 'hetnet':
-        cnx.initWireless(args.T, *(args.hetnet_params[0:1]), gains, *args.wireless_consts) # For HetNet we have to initialize wireless parameters, currently only gains need to be passed, sinr_min/max, power_max and noise can also be set
+        cnx.initWireless(args.T, args.graph_size, args.hetnet_params[0], gains, *args.wireless_consts) # For HetNet we have to initialize wireless parameters, currently only gains need to be passed, sinr_min/max, power_max and noise can also be set
     logging.info('...done')
 
     Y, res = cnx.minimizeRelaxation()

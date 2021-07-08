@@ -1,5 +1,6 @@
 from networkx import Graph, selfloop_edges, shortest_path
 import numpy as np
+import pickle
 
 def Dtelekom():
     G = Graph()
@@ -504,4 +505,16 @@ def HetNet(V, SC, R_cell, pathloss_exponent):
     for (v,u) in G.edges():
         G.edges[v,u]['gain'] = min( 1, np.linalg.norm( G.nodes[v]['pos'] - G.nodes[u]['pos'] ) ** (-pathloss_exponent) )
         G.edges[v,u]['cost'] = 1/G.edges[v,u]['gain']
+    
+    top_file = 'topfiles/top_V' + str(V) + '_SC' + str(SC) + '_R' + str(R_cell) + '_exp' + str(pathloss_exponent)
+     
+    with open(top_file,'wb+') as f:
+        pickle.dump(G, f)
+
+    return G
+
+def LoadHetNet(top_file):
+    with open(top_file, 'rb') as f:
+        G = pickle.load(f)
+    
     return G

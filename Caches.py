@@ -90,6 +90,8 @@ class PriorityCache(Cache):
     def __init__(self, capacity, _id):
         Cache.__init__(self, capacity, _id)
         self._contents = PriorityStruct()
+        self._w = {} # transmitting power frac
+        self._powercap = {} # transmitting power cap
 
     def __contains__(self, item):
         return item in self._contents
@@ -325,7 +327,9 @@ class LMinimalCache(Cache):
         self._grad = {}
         #self._Score_n = {}
         self._last_shuffle_time = time
-        #print("** Node: " + str(self._id) + ", cache state: "+str(self._state))
+        if self._id == 4:
+            #print("** Node: " + str(self._id) + ", cache: "+str(self._cache))
+            pass
         #print("power state subgradient:" + str(self._w_gradient))
 
     def state(self, item):

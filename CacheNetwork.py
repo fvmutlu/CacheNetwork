@@ -164,6 +164,7 @@ class CacheNetwork(DiGraph):
    """
     def __init__(self,
                  G,
+                 cacheType,
                  cacheGenerator,
                  demands,
                  item_sources,
@@ -188,6 +189,7 @@ class CacheNetwork(DiGraph):
         self.demand_max = demand_max
         
         # parameters used for wireless
+        #self.demands = demands
         self.T = T
         self.graphsize = G.number_of_nodes()
         self.PowerCap = []
@@ -199,9 +201,12 @@ class CacheNetwork(DiGraph):
         self.A_powercap = []
         self.b_powercap = []
         #self.PowerFrac_pre_projection = {}
+        self.cache_type = cacheType
         self.WirelessGain = {}
         self.w_gradient = {}
         self.w_tilde = [] # vector/list
+        self.Global_Power_Consume = 0.0 # the averaged global power consumption till the end of last time slot
+        self.Current_Power_Consume = 0.0 # used to compute power consumption during last time slot
 
         DiGraph.__init__(self, G)
         for x in self.nodes():
@@ -219,6 +224,9 @@ class CacheNetwork(DiGraph):
 
         for d in demands:
             self.demands[d] = {}
+            #self.demands[d]['item'] = d.item
+            #self.demands[d]['path'] = d.path
+            #self.demands[d]['rate'] = d.rate
             self.demands[d]['pipe'] = Store(self.env)
             self.demands[d]['queries_spawned'] = 0L
             self.demands[d]['queries_satisfied'] = 0L
@@ -253,23 +261,26 @@ class CacheNetwork(DiGraph):
             self.env.process(self.cache_process(x))
         
         # start power update process
-        self.env.process(self.power_update_process())
+        if self.cache_type == 'LMIN':
+            self.env.process(self.power_update_process_LMIN())
+        else:
+            self.env.process(self.power_update_process_Priority())
 
         self.env.process(self.monitor_process())
 
     def initWireless(self, demands, gains = {}, sinr_min = 0.1, sinr_max = 1.0, power_max = 100.0, noise = 1.0):
 		
 		# identify the edges that used in a path
-		print("Network edges: "+str(self.edges()))
+		#print("Network edges: "+str(self.edges()))
 		for e in self.edges():
 			v = e[0]
 			u = e[1]
 			self.edge[v][u]['is_in_path'] = 0
 
-		print("Network paths:")
+		#print("Network paths:")
 		for d in demands:
 			path_d = d.path
-			print(path_d)
+			#print(path_d)
 			for k in range(len(path_d)-1):
 				v = path_d[k]
 				u = path_d[k+1]
@@ -282,7 +293,7 @@ class CacheNetwork(DiGraph):
 			u = e[1]
 			if self.edge[v][u]['is_in_path'] == 1:
 				#self.edge[v][u]['sinrconst'] = random.uniform(sinr_min, sinr_max)
-				self.edge[v][u]['sinrconst'] = 0.1
+				self.edge[v][u]['sinrconst'] = 0.05
 			else:
 				self.edge[v][u]['sinrconst'] = 0
 
@@ -357,7 +368,7 @@ class CacheNetwork(DiGraph):
 		for v in self.nodes():
 			for u in self.nodes():
 				if (v,u) in self.edges():
-					print("LP: Edge "+str((v,u))+"setting")
+					#print("LP: Edge "+str((v,u))+"setting")
 					# b = gammavu*Nu
 					self.Power_LP_b[edge_id] = self.edge[v][u]['sinrconst'] * self.noise
 					# Matrix A:
@@ -395,27 +406,30 @@ class CacheNetwork(DiGraph):
             for u in self.nodes():
                 if (v,u) in self.edges():
                     self.edge[v][u]['power'] = self.PowerFrac[v][u] * self.PowerCap[v]
-        print("Power pushed to caches at time "+str(self.env.now))
+        print("Power successfully pushed to caches and edges at time "+str(self.env.now))
         
-    def power_update_process(self,alpha = 0.05):
+    def power_update_process_LMIN(self,alpha = 5.e-2):
         # Process that pull the subgradients of power from caches, 
         # project and update global power every T 
         while True:
-            yield self.env.timeout(self.T)
             
-            print("Power global-updating at time "+str(self.env.now))
-            # step0: reset parameters
+            #print("Power global-updating at time "+str(self.env.now))
+            # step0: collect power consumption and reset
+            self.Current_Power_Consume = 0.0
             for v in self.nodes():
+                self.Current_Power_Consume += self.node[v]['cache'].stats['history_power_consume']
                 self.w_gradient[v] = {}
                 for u in self.nodes():
                     self.w_gradient[v][u] = 0.0
             self.w_tilde = [0.0 for i in range(self.graphsize **2)]
+            print("Time-averaged power consumption in last time slot ="+str((self.Current_Power_Consume - self.Global_Power_Consume)/self.T))
+            self.Global_Power_Consume = self.Current_Power_Consume
             
             # step1: pull n-scores from each node and compute estimated subgradient from 
             for v in self.nodes():
                 for u in self.nodes():
                     if u in self.node[v]['cache'].cache._Score_n.keys():
-                        self.w_gradient[v][u] = self.node[v]['cache'].cache._Score_n[u] *1.0 / self.T
+                        self.w_gradient[v][u] = -1.0* self.PowerCap[v] * self.node[v]['cache'].cache._Score_n[u]  / self.T
                     else:
                         #print("not in key")
                         self.w_gradient[v][u] = 0.0
@@ -437,10 +451,18 @@ class CacheNetwork(DiGraph):
             h_qp = matrix( -1.0 * np.transpose(np.hstack((self.Power_LP_b, self.b_nonnegative, self.b_powercap))))
             #h_qp = matrix( -1.0 * np.transpose(np.hstack((self.b_nonnegative, self.b_powercap))))
             
-            sol_qp = qp(P_qp, Q_qp, G_qp, h_qp)
-            
+            sol_qp = qp(P_qp, Q_qp, G_qp, h_qp,options={'show_progress': False})
+            Iter = sol_qp['iterations']
             # step3: update global power variable
             w_bar = sol_qp['x']
+            #print(Iter)
+            #print(G_qp*w_bar - h_qp)
+            if Iter >= 50 or np.max(G_qp*w_bar - h_qp) > 1.e-9:
+                print("Fail to solve projection at time "+str(self.env.now))
+                #print(G_qp*w_bar - h_qp)
+                yield self.env.timeout(self.T)
+                continue
+            
             epsilon = 1.e-3
             for v in self.nodes():
                 for u in self.nodes():
@@ -452,9 +474,68 @@ class CacheNetwork(DiGraph):
             
             # step4: push power to caches and edges
             self.push_power()
-            print("...done")
+            #print("...done")
+            yield self.env.timeout(self.T)
 
-
+    def power_update_process_Priority(self):
+        # Centralized power updating for other cache types
+        while(True):
+            # step0: collect power consumption and reset
+            self.Current_Power_Consume = 0.0
+            for v in self.nodes():
+                self.Current_Power_Consume += self.node[v]['cache'].stats['history_power_consume']
+                self.w_gradient[v] = {}
+                for u in self.nodes():
+                    self.w_gradient[v][u] = 0.0
+            self.w_tilde = [0.0 for i in range(self.graphsize **2)]
+            print("Time-averaged power consumption in last time slot ="+str((self.Current_Power_Consume - self.Global_Power_Consume)/self.T))
+            self.Global_Power_Consume = self.Current_Power_Consume
+            
+            # step1: collects the caching states and construct LP elements:
+            # max sum_f lamb_f sum_k=1^(p-1) t_{i,p,k}
+            # s.t. t_{i.p.k} <= 1; t_{i.p.k} <= 1 - w_{p_k+1 p_k} + sum_l=1^k x_{p_l i}; SINR; Powercap
+            size_t = 0
+            for d in self.demands:
+                size_t += len(d.path)-1
+            t_const_1 = np.ones(size_t) # row vector for t <= 1
+            t_const_2 = np.zeros(size_t) # row vector for t <= 1-w+sum...
+            t_pos = 0
+            c_lp = np.zeros(size_t + self.graphsize**2)
+            for d in self.demands:
+                for k in [1+i for i in range(len(d.path)-1)]:
+                    c_lp[t_pos] = -1.0 * d.rate
+                    sum_cache = 0.0
+                    for l in range(k):
+                        sum_cache += d.item in self.node[d.path[l]]['cache'].cache
+                    t_const_2[t_pos] = 1 - self.PowerFrac[d.path[k]][d.path[k-1]]
+                    t_pos += 1
+            #print("size_t = "+str(size_t)+", t_pos = "+str(t_pos))
+            
+            # step2: solve LP: min cTx , s.t. Gx <= h
+            c_lp = matrix(np.transpose(c_lp))
+            G1 = np.hstack((np.identity(size_t), np.zeros((size_t,self.graphsize**2))))
+            G2 = G1
+            G_W = -1.0 * np.vstack((self.Power_LP_A, self.A_nonnegative, self.A_powercap))
+            rows,cols = np.shape(G_W)
+            G3 = np.hstack(( np.zeros(( rows, size_t)),  G_W ))
+            G_lp = matrix(np.vstack((G1,G2,G3)))
+            
+            h_W = -1.0 * np.hstack((self.Power_LP_b, self.b_nonnegative, self.b_powercap))
+            h_lp = matrix(np.transpose(np.hstack((t_const_1,t_const_2,h_W))))
+            #print("c_lp = "+str(c_lp))
+            #print("G_lp = "+str(G_lp))
+            #print("h_lp = "+str(h_lp))
+            
+            sol_lp = lp(c = c_lp, G = G_lp, h = h_lp, options={'show_progress': False})
+            
+            # step3: update power variables
+            for v in self.nodes():
+                for u in self.nodes():
+                    self.PowerFrac[v][u] = sol_lp['x'][size_t + v*self.graphsize +u]
+            
+            self.push_power()
+            yield self.env.timeout(self.T)
+    
     def run(self, finish_time):
 
         logging.info('Simulating..')
@@ -490,12 +571,13 @@ class CacheNetwork(DiGraph):
             stats = msg.stats
             now = self.env.now
 
-            if lab is not "RESPONSE":
+            if lab is not "RESPONSE": # Not likely, all msg pushed to the demand pipe should be respond
+                #print(lab)
                 logging.warning(
                     pp([now, ':', d, 'received a non-response message:', msg]))
                 continue
 
-            if dem is not d:
+            if dem is not d: # Not likely
                 logging.warning(
                     pp([
                         now, ':', d, 'received a message', msg,
@@ -503,7 +585,7 @@ class CacheNetwork(DiGraph):
                     ]))
                 continue
 
-            if query_id not in self.demands[d]['pending']:
+            if query_id not in self.demands[d]['pending']: # Not likely
                 logging.warning(
                     pp([
                         'Query', query_id, 'of', d, 'satisfied but not pending'
@@ -515,7 +597,8 @@ class CacheNetwork(DiGraph):
             logging.debug(
                 pp(['Query', query_id, 'of', d, 'satisfied with stats',
                     stats]))
-            self.demands[d]['queries_satisfied'] += 1L
+            #print(stats)
+            self.demands[d]['queries_satisfied'] += 1
 
             if now >= self.warmup:
                 self.demands[d]['queries_logged'] += 1.0
@@ -585,9 +668,19 @@ class CacheNetwork(DiGraph):
             msg.stats['delay'] += delay
             msg.stats['hops'] += 1.0
             msg.stats['weight'] += self.edge[e[0]][e[1]]['weight']
+            
             if not msg.u_bit:
-                msg.stats['downweight'] += self.edge[e[0]][
-                    e[1]]['weight'] + self.edge[e[1]][e[0]]['weight']
+                
+                # For wireline case, aggregates the link weights as the downweight
+                #msg.stats['downweight'] += self.edge[e[0]][e[1]]['weight'] + self.edge[e[1]][e[0]]['weight']
+            
+                # For wireless case, aggregates the transmitting powers as the downweight
+                msg.stats['downweight'] += self.edge[e[0]][e[1]]['power']
+                #print("self.edge[e[0]][e[1]]['power'] = "+str(self.edge[e[0]][e[1]]['power']))
+                
+                #print("Time:"+str(self.env.now)+"msg "+str(msg.header)+" passing through edge "+str(e)+", power: "+str(self.edge[e[0]][e[1]]['power']))
+                
+                
             logging.debug(
                 pp([self.env.now, ':', 'Pipe at', e, 'delivering', msg]))
             self.node[e[1]]['pipe'].put((msg, e))
@@ -597,21 +690,24 @@ class CacheNetwork(DiGraph):
 
 	   It is effectively a wrapper for a receive call, made to a NetworkedCache object. 
 
-	"""
+	    """
         while True:
             (msg, e) = yield self.node[x]['pipe'].get()
             generated_messages = self.node[e[1]]['cache'].receive(
                 msg, e, self.env.now
             )  #THIS NEEDS TO BE IMPLEMENTED BY THE NETWORKED CACHE!!!!
             for (new_msg, new_e) in generated_messages:
+                # e[1] could be the next node (type = int), or a demand id (type = instance)
                 if new_e[1] in self.demands:
+                    # new_msg has already reached the final node
                     yield self.demands[new_e[1]]['pipe'].put(new_msg)
                 else:
+                    # new_msg will continue propagating
                     yield self.edge[new_e[0]][new_e[1]]['pipe'].put(new_msg)
 
     def cachesToMatrix(self):
         """Constructs a matrix containing cache information.
-	"""
+	    """
         zipped = []
         n = len(self.nodes())
         m = max(len(self.item_set), max(self.item_set) + 1)
@@ -625,7 +721,7 @@ class CacheNetwork(DiGraph):
 
     def statesToMatrix(self):
         """Constructs a matrix containing marginal information. This assumes that caches contain a state() function, capturing maginals. Only LMin implements this
-	"""
+	    """
         zipped = []
         n = len(self.nodes())
         m = max([d.item for d in self.demands]) + 1
@@ -640,7 +736,7 @@ class CacheNetwork(DiGraph):
 
     def social_welfare(self):
         """ Function computing the social welfare.
-	"""
+	    """
         dsw = 0.0
         hsw = 0.0
         wsw = 0.0
@@ -666,7 +762,7 @@ class CacheNetwork(DiGraph):
 
     def caching_gain(self):
         """ Function computing the caching gain under the present caching situation
-	"""
+	    """
         X = self.cachesToMatrix()
         return self.expected_caching_gain(X)
 
@@ -691,7 +787,7 @@ class CacheNetwork(DiGraph):
 
     def expected_caching_gain(self, Y):
         """ Function computing the expected caching gain under marginals Y, presuming product form. Also computes deterministic caching gain if Y is integral.
-	"""
+    	"""
         ecg = 0.0
         sumrate = 0.0
         for d in self.demands:
@@ -714,7 +810,7 @@ class CacheNetwork(DiGraph):
 
     def relaxation(self, Y):
         """ Function computing the relaxation of caching gain under marginals Y. Relaxation equals deterministic caching gain if Y is integral.
-	"""
+	    """
         rel = 0.0
         sumrate = 0.0
         for d in self.demands:
@@ -737,7 +833,7 @@ class CacheNetwork(DiGraph):
 
     def demand_stats(self):
         """ Computed stats across demands.
-	"""
+        """
         stats = {}
         queries_logged = 0.0
         rate = 0.0
@@ -782,9 +878,6 @@ class CacheNetwork(DiGraph):
                 except AttributeError:
                     logging.debug(pp([now, ": No states in this class"]))
 
-#M=self.cachesToMatrix()
-#formatted = [  (i,j,'*')  if self.node[i]['cache'].isPermanent(j) else (i,j)  for i,j,v in  zip(M.I,M.J,M.V)   ]
-#logging.info(str(sorted(formatted)))
             yield self.env.timeout(random.expovariate(self.monitoring_rate))
 
     def minimizeRelaxation(self):
@@ -982,6 +1075,7 @@ class PriorityNetworkCache(NetworkedCache):
         self.stats['queries'] = 0.0
         self.stats['hits'] = 0.0
         self.stats['responses'] = 0.0
+        self.stats['history_power_consume'] = 0.0 # use to calculate the objective (power consumption)
         self.principle = principle
 
     def __str__(self):
@@ -1047,6 +1141,10 @@ class PriorityNetworkCache(NetworkedCache):
                             'delivered to query source by cache', self._id
                         ]))
                     pred = d
+                    
+                    # for the case that requesting node has item in its cache
+                    self.stats['history_power_consume'] += 0.0
+                    
                 else:
                     pred = d.pred(self._id)
                     logging.debug(
@@ -1054,6 +1152,10 @@ class PriorityNetworkCache(NetworkedCache):
                             now, ': Response to query', query_id, 'of', d,
                             ' generated by cache', self._id
                         ]))
+                    
+                    # for the case that  node has item in its cache, send respond msg
+                    self.stats['history_power_consume'] += self.cache._powercap * self.cache._w[pred]
+                    
                 e = (self._id, pred)
                 rmsg = ResponseMessage(d, query_id, stats=msg.stats)
                 return [(rmsg, e)]
@@ -1071,6 +1173,10 @@ class PriorityNetworkCache(NetworkedCache):
                             self._id, 'and has nowhere to go, will be dropped'
                         ]))
                     return []
+                
+                # query continue propagates
+                self.stats['history_power_consume'] += self.cache._powercap * self.cache._w[succ]
+                    
                 e = (self._id, succ)
                 return [(msg, e)]
 
@@ -1105,6 +1211,9 @@ class PriorityNetworkCache(NetworkedCache):
                         ' finally delivered by cache', self._id
                     ]))
                 pred = d
+                 # arrive at the query node
+                self.stats['history_power_consume'] += 0.0
+                
             else:
                 logging.debug(
                     pp([
@@ -1113,6 +1222,8 @@ class PriorityNetworkCache(NetworkedCache):
                         'moving further down path'
                     ]))
                 pred = d.pred(self._id)
+                 # respond continue propagates
+                self.stats['history_power_consume'] += self.cache._powercap * self.cache._w[pred]
             e = (self._id, pred)
             return [(msg, e)]
 
@@ -1394,6 +1505,7 @@ class LMinCache(NetworkedCache):
         self.stats['responses'] = 0.0
         self.stats['explores'] = 0.0
         self.stats['explore_responses'] = 0.0
+        self.stats['history_power_consume'] = 0.0 # use to calculate the objective (power consumption)
 
     def __str__(self):
         return 'Cache: ' + str(self.cache) + 'Permanent: ' + str(
@@ -1466,6 +1578,10 @@ class LMinCache(NetworkedCache):
                             ' finally delivered by cache', self._id
                         ]))
                     pred = d
+                    
+                    # for the case that requesting node has item in its cache
+                    self.stats['history_power_consume'] += 0.0
+                    
                 else:
                     pred = d.pred(self._id)
                     logging.debug(
@@ -1473,6 +1589,12 @@ class LMinCache(NetworkedCache):
                             now, ': Response to query', query_id, 'of', d,
                             ' generated by cache', self._id
                         ]))
+                    # for the case that a hit cache for non-requesting node, consumes power
+                    self.stats['history_power_consume'] += self.cache._powercap * self.cache._w[pred]
+                    if self._id == 1:
+                        #print("self.stats['history_power_consume'] +="+str(self.cache._powercap * self.cache._w[pred]))
+                        pass
+                    
                 e = (self._id, pred)
                 rmsg = ResponseMessage(d, query_id, stats=msg.stats)
 
@@ -1516,6 +1638,10 @@ class LMinCache(NetworkedCache):
                         ' finally delivered by cache', self._id
                     ]))
                 pred = d
+                
+                # for case that a content is delivered, no power consumed
+                self.stats['history_power_consume'] += 0.0
+                
             else:
                 logging.debug(
                     pp([
@@ -1524,6 +1650,12 @@ class LMinCache(NetworkedCache):
                         'moving further down path'
                     ]))
                 pred = d.pred(self._id)
+                # for case that a content need further delivery, power consumed
+                self.stats['history_power_consume'] += self.cache._powercap * self.cache._w[pred]
+                if self._id == 1:
+                    #print("self.stats['history_power_consume'] +="+str(self.cache._powercap * self.cache._w[pred]))
+                    pass
+                
             e = (self._id, pred)
             return [(msg, e)]
 
@@ -1702,7 +1834,7 @@ class LMinCache(NetworkedCache):
                     self.env.now, ': New cache at', self._id, ' is', self.cache
                 ]))
             #logging.debug('Setting cache at %d to %s, probability was:%f' %(self._id,str(self.cache),probs[key]) )
-            print("Cache "+str(self._id)+" shuffuled at time "+str(self.env.now))
+            #print("Cache "+str(self._id)+" shuffuled at time "+str(self.env.now))
             yield self.env.timeout(self.T)
             
             # update power variables of cache
@@ -2043,7 +2175,7 @@ def main():
         logging.debug(pp([key, ':', capacities[key]]))
 
     logging.info('Building CacheNetwork')
-    cnx = CacheNetwork(G, cacheGenerator, demands, item_sources, capacities,
+    cnx = CacheNetwork(G, args.cache_type ,cacheGenerator, demands, item_sources, capacities,
                        weights, weights, args.T, args.warmup, args.monitoring_rate,
                        args.demand_change_rate, args.min_rate, args.max_rate)
     logging.info('...done')
@@ -2070,13 +2202,32 @@ def main():
     node_stats = {}
     network_stats = {}
 
+    Cost_global_comp = 0.0
     for d in cnx.demands:
         demand_stats[str(d)] = cnx.demands[d]['stats']
         demand_stats[str(
             d)]['queries_spawned'] = cnx.demands[d]['queries_spawned']
         demand_stats[str(
             d)]['queries_satisfied'] = cnx.demands[d]['queries_satisfied']
+        Cost_global_comp += cnx.demands[d]['stats']['downweight'] / args.time
+        #print("demand "+str(d)+": total cases ="+ str(cnx.demands[d]['stats']['queries_satisfied']) +", power consumption: "+str(cnx.demands[d]['stats']['downweight']))
 
+    # collecting overall cost from all caches
+    Cost_global = 0.0
+    for v in cnx.nodes():
+        Cost_global += cnx.node[v]['cache'].stats['history_power_consume'] / args.time
+    #print("Time-averaged global power consumption from caches:"+str(Cost_global) + ", from demands:"+str(Cost_global_comp))
+    #print("Final Power Frac:")
+    Sum_W = 0.0
+    for v in cnx.nodes():
+        #print("Node "+str(v)+": "+str(cnx.PowerFrac[v]))
+        for u in cnx.nodes():
+            Sum_W += np.sum(cnx.PowerFrac[v][u])
+    network_stats['global_cost'] = Cost_global
+    print("Sum of w entries: "+ str(Sum_W))
+    
+    
+    
     for x in cnx.nodes():
         node_stats[x] = cnx.node[x]['cache'].stats
 

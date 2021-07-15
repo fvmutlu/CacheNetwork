@@ -222,7 +222,7 @@ class CacheNetwork(DiGraph):
 
         self.env.process(self.monitor_process())
 
-    def initWireless(self, T, V, SC, gains, power_max = 10, sinr = 0.1, noise = 1.0):
+    def initWireless(self, T, V, SC, gains, cache_type, power_max = 10, sinr = 0.1, noise = 1.0):
         """ Separate init function for wireless scenario.
         
             Sets/constructs the following parameters/variables:
@@ -250,6 +250,8 @@ class CacheNetwork(DiGraph):
         self.WirelessGain = {}
         self.w_gradient = {}
         self.w_tilde = [] # vector/list
+        self.Global_Power_Consume = 0.0 # the averaged global power consumption till the end of last time slot
+        self.Current_Power_Consume = 0.0 # used to compute power consumption during last time slot
         self.noise = noise
         
         #self.A = [[0]*len(self.edges()) for i in range(len(self.edges()))]
@@ -263,6 +265,7 @@ class CacheNetwork(DiGraph):
 
         for d in self.demands:
             path_d = d.path
+            print(path_d)
             for k in range(len(path_d)-1):
                 v = path_d[k]
                 u = path_d[k+1]
@@ -355,6 +358,12 @@ class CacheNetwork(DiGraph):
                     elif vp != u:
                         self.A[i][j] = -1 * self.edge[v][u]['sinrconst'] * self.edge[vp][u]['gain'] """
     
+        # start power update process
+        if cache_type == 'LMIN':
+            self.env.process(self.power_update_process_LMIN())
+        else:
+            self.env.process(self.power_update_process_Priority())
+        
     def push_power(self):
         for v in self.nodes():
             power_cap = self.PowerCap[v]
@@ -654,7 +663,7 @@ class CacheNetwork(DiGraph):
                 zipped.append((self.node[x]['cache'].state(item), x, item))
 
         val, I, J = zip(*zipped)
-
+        J = list(map(int,J))
         return spmatrix(val, I, J, size=(n, m))
 
     def social_welfare(self):
@@ -1683,13 +1692,14 @@ def main():
     # plt.draw()
     logging.debug('nodes: '+str(temp_graph.nodes()))
     logging.debug('edges: '+str(temp_graph.edges()))
-    G = DiGraph()
+    G = DiGraph() # TODO: Need to fix how the edges in the directed graph works, because right now users can forward packets
 
     number_map = dict(zip(temp_graph.nodes(), range(len(temp_graph.nodes()))))
     G.add_nodes_from(number_map.values())
     weights = {}
     if args.graph_type == 'hetnet':
         gains = {}
+        costs = {}
     for (x, y) in temp_graph.edges():
         xx = number_map[x]
         yy = number_map[y]
@@ -1699,6 +1709,11 @@ def main():
         if args.graph_type == 'hetnet':
             gains[(xx, yy)] = temp_graph.edges[x, y]['gain'] # Will be necessary for power calculations for HetNet case
             gains[(yy, xx)] = gains[(xx, yy)]
+            costs[(xx, yy)] = temp_graph.edges[x, y]['cost']
+            costs[(yy, xx)] = costs[(xx, yy)]
+    if args.graph_type == 'hetnet':
+        for (xx,yy) in G.edges():
+            G.edges[xx,yy]['cost'] = costs[(xx,yy)]
     graph_size = G.number_of_nodes()
     edge_size = G.number_of_edges()
     logging.info('...done. Created graph with %d nodes and %d edges' %
@@ -1756,6 +1771,9 @@ def main():
         if args.graph_type == 'hetnet':            
             new_dems = [Demand(items_requested[pos], shortest_path(G, x, number_map["nodeMC"], weight='cost'), # For HetNet shortest path depends on link costs and is always routed to MC
                            random.uniform(args.min_rate, args.max_rate)) for pos in range(len(demands), len(demands)+dem)]
+            #print(list(temp_graph.nodes())[x])
+            #new_dems = [Demand(items_requested[pos], shortest_path(temp_graph, list(temp_graph.nodes())[x], "nodeMC", weight='cost'),
+            #                random.uniform(args.min_rate, args.max_rate)) for pos in range(len(demands), len(demands)+dem)]
         else:
             new_dems = [Demand(items_requested[pos], shortest_path(G, x, item_sources[items_requested[pos]][0], weight='weight'),
                            random.uniform(args.min_rate, args.max_rate)) for pos in range(len(demands), len(demands)+dem)]
@@ -1780,7 +1798,7 @@ def main():
     cnx = CacheNetwork(G, cacheGenerator, demands, item_sources, capacities, weights, weights,
                        args.warmup, args.monitoring_rate, args.demand_change_rate, args.min_rate, args.max_rate) # This initializes a random process for link delays based on weights, it will be different for HetNet
     if args.graph_type == 'hetnet':
-        cnx.initWireless(args.T, args.graph_size, args.hetnet_params[0], gains, *args.wireless_consts) # For HetNet we have to initialize wireless parameters, currently only gains need to be passed, sinr_min/max, power_max and noise can also be set
+        cnx.initWireless(args.T, args.graph_size, args.hetnet_params[0], gains, args.cache_type, *args.wireless_consts) # For HetNet we have to initialize wireless parameters, currently only gains need to be passed, sinr_min/max, power_max and noise can also be set
     logging.info('...done')
 
     Y, res = cnx.minimizeRelaxation()

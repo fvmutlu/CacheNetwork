@@ -91,6 +91,8 @@ class PriorityCache(Cache):
     def __init__(self, capacity, _id):
         Cache.__init__(self, capacity, _id)
         self._contents = PriorityStruct()
+        self._w = {} # transmitting power frac
+        self._powercap = {} # transmitting power cap
 
     def __contains__(self, item):
         return item in self._contents
@@ -295,7 +297,7 @@ class LMinimalCache(Cache):
         # if dictL1(sliding_average)>self._capacity:
         #     print self._past_states
         # print "state:",self._state
-        # print "sliding:",sliding_average
+        # print("sliding:"+str(sliding_average))
         # print "past:",self._past_states
 
         placements, probs, distr = constructDistribution(sliding_average, self._capacity)
@@ -321,7 +323,7 @@ class LMinimalCache(Cache):
 
         self._k = k
         self._grad = {}
-        self._Score_n = {}
+        #self._Score_n = {}
         self._last_shuffle_time = time
         #print("** Node: " + str(self._id) + ", cache state: "+str(self._state))
         #print("power state subgradient:" + str(self._w_gradient))

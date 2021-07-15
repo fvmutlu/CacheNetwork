@@ -1,0 +1,1 @@
+python3 CacheNetwork.py results/out.hetnettest --graph_type hetnet --graph_size 30 --debug_level ERROR --cache_type LMIN --min_capacity 3 --max_capacity 3 --query_nodes 20 --catalog_size 30 --demand_size 40 --max_weight 100 --time 500 --T 10 --hetnet_params 9 3 3.7 --wireless_consts 10.0 0.1

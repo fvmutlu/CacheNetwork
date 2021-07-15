@@ -29,8 +29,8 @@ def projectToSimplex(d, cap):
 
 
 def constructDistribution(d, cap):
-    epsilon = 1.e-3
-
+    epsilon = 1.e-5
+    
     # Remove very small values, rescale the rest
     dd = dict((key, d[key]) for key in d if d[key] > epsilon)
     keys, vals = zip(*[(key, d[key]) for key in dd])

@@ -265,7 +265,7 @@ class CacheNetwork(DiGraph):
 
         for d in self.demands:
             path_d = d.path
-            print(path_d)
+            #print(path_d)
             for k in range(len(path_d)-1):
                 v = path_d[k]
                 u = path_d[k+1]
@@ -312,9 +312,9 @@ class CacheNetwork(DiGraph):
             v = e[0]
             u = e[1]
             self.edge[v][u]['power'] = self.PowerCap[v] * self.PowerFrac[v][u]
-            #self.edge[v][u]['gain'] = gains[e]
-            self.edge[v][u]['gain'] = 1.0 # temp setting
-            self.WirelessGain[v][u] = 1.0
+            self.edge[v][u]['gain'] = gains[e]
+            #self.edge[v][u]['gain'] = 1.0 # temp setting
+            self.WirelessGain[v][u] = gains[e]
 
         # Push power to each node
         self.push_power()
@@ -410,14 +410,17 @@ class CacheNetwork(DiGraph):
             
             # step3: project w_tilde vector into constraint set Aw>=b, i.e. min w'Pw + Q'w, s.t. Gw <= h
             Q_qp = matrix(-2.0 * np.transpose(np.array(self.w_tilde)))
-            #print("Q = "+str(Q))
+            
             P_qp = matrix(np.identity(self.graphsize ** 2))
+            
             
             G_qp = matrix( -1.0 * np.vstack((self.Power_LP_A, self.A_nonnegative, self.A_powercap)))
             #G_qp = matrix( -1.0 * np.vstack((self.A_nonnegative, self.A_powercap)))
+            
            
             h_qp = matrix( -1.0 * np.transpose(np.hstack((self.Power_LP_b, self.b_nonnegative, self.b_powercap))))
             #h_qp = matrix( -1.0 * np.transpose(np.hstack((self.b_nonnegative, self.b_powercap))))
+            
             
             sol_qp = qp(P_qp, Q_qp, G_qp, h_qp, options={'show_progress': False})
             Iter = sol_qp['iterations']            
@@ -425,7 +428,7 @@ class CacheNetwork(DiGraph):
             w_bar = sol_qp['x']
             #print(Iter)
             #print(G_qp*w_bar - h_qp)
-            if Iter >= 50 or np.max(G_qp*w_bar - h_qp) > 1.e-9:
+            if Iter >= 150 or np.max(G_qp*w_bar - h_qp) > 1.e-9:
                 print("Fail to solve projection at time "+str(self.env.now))
                 #print(G_qp*w_bar - h_qp)
                 yield self.env.timeout(self.T)
@@ -1509,13 +1512,13 @@ class LMinCache(NetworkedCache):
         """
         while True:
             logging.debug(
-                pp([self.env.now, ': New suffling of cache', self._id]))
+                pp([self.env.now, ': New shuffling of cache', self._id]))
             # key,placements,probs,distr=self.cache.shuffle(self.env.now)
+            #print("Cache "+str(self._id)+" shuffling at time "+str(self.env.now))
             self.cache.shuffle(self.env.now)
             logging.debug(
                 pp([self.env.now, ': New cache at', self._id, ' is', self.cache]))
             #logging.debug('Setting cache at %d to %s, probability was:%f' %(self._id,str(self.cache),probs[key]) )
-            #print("Cache "+str(self._id)+" shuffuled at time "+str(self.env.now))
             yield self.env.timeout(self.T)
 
             # update power variables of cache
@@ -1699,7 +1702,7 @@ def main():
     weights = {}
     if args.graph_type == 'hetnet':
         gains = {}
-        costs = {}
+        #costs = {}
     for (x, y) in temp_graph.edges():
         xx = number_map[x]
         yy = number_map[y]
@@ -1709,11 +1712,16 @@ def main():
         if args.graph_type == 'hetnet':
             gains[(xx, yy)] = temp_graph.edges[x, y]['gain'] # Will be necessary for power calculations for HetNet case
             gains[(yy, xx)] = gains[(xx, yy)]
-            costs[(xx, yy)] = temp_graph.edges[x, y]['cost']
-            costs[(yy, xx)] = costs[(xx, yy)]
-    if args.graph_type == 'hetnet':
-        for (xx,yy) in G.edges():
-            G.edges[xx,yy]['cost'] = costs[(xx,yy)]
+            #costs[(xx, yy)] = temp_graph.edges[x, y]['cost']
+            #costs[(yy, xx)] = costs[(xx, yy)]
+            G.edges[xx,yy]['cost'] = temp_graph.edges[x, y]['cost']
+            if yy >= len(G.nodes()) - args.query_nodes: # If the edge is to a user, make cost infinite on the reverse path to discourage routing through users
+                G.edges[yy,xx]['cost'] = 1e6 * temp_graph.edges[x, y]['cost']
+            else:
+                G.edges[yy,xx]['cost'] = temp_graph.edges[x, y]['cost']
+    #if args.graph_type == 'hetnet':
+        #for (xx,yy) in G.edges():
+            #G.edges[xx,yy]['cost'] = costs[(xx,yy)]
     graph_size = G.number_of_nodes()
     edge_size = G.number_of_edges()
     logging.info('...done. Created graph with %d nodes and %d edges' %
@@ -1787,7 +1795,12 @@ def main():
     construct_stats['demands'] = len(demands)
 
     logging.info('Generating capacities...')
-    capacities = dict((x, random.randint(args.min_capacity,
+    if args.graph_type == 'hetnet': # In HetNet case, SCs have capacity equal to passed max capacity, users have 0 and MC currently has capacity equal to catalog
+        capacities = {0: args.catalog_size}
+        capacities.update(dict((x,args.max_capacity) for x in range(1,len(G.nodes()) - args.query_nodes)))
+        capacities.update(dict((x,0) for x in range(len(G.nodes()) - args.query_nodes, len(G.nodes))))
+    else:
+        capacities = dict((x, random.randint(args.min_capacity,
                       args.max_capacity)) for x in G.nodes())
     logging.info('...done. Generated %d caches' % len(capacities))
     logging.debug('Generated capacities:')

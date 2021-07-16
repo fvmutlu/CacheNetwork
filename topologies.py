@@ -507,7 +507,6 @@ def HetNet(V, SC, R_cell, pathloss_exponent):
     for (v,u) in G.edges():
         G.edges[v,u]['gain'] = min( 1, np.linalg.norm( G.nodes[v]['pos'] - G.nodes[u]['pos'] ) ** (-pathloss_exponent) )
         G.edges[v,u]['cost'] = 1/G.edges[v,u]['gain']
-        print(v,u,(G.edges[v,u]['cost']))
     
     top_file = 'topfiles/top_V' + str(V) + '_SC' + str(SC) + '_R' + str(R_cell) + '_exp' + str(pathloss_exponent)
      

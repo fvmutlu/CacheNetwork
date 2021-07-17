@@ -4,7 +4,7 @@
 '''
 from abc import ABCMeta, abstractmethod
 from Caches import PriorityCache, EWMACache, LMinimalCache
-from networkx import Graph, DiGraph, shortest_path
+from networkx import Graph, DiGraph, shortest_path, all_simple_paths
 import networkx
 import random
 from cvxopt import spmatrix, matrix
@@ -18,6 +18,7 @@ import itertools
 from statsmodels.distributions.empirical_distribution import ECDF
 import pickle
 import topologies
+from helpers import projectToSimplex_list
 
 
 class CONFIG(object):
@@ -30,6 +31,28 @@ class CONFIG(object):
 def pp(l):
     return ' '.join(map(str, l))
 
+def succFun(node, path):
+    """ The successor of a node in the path. 
+   	"""
+    if node not in path:
+        return None
+    i = path.index(node)
+    if i + 1 == len(path):
+        return None
+    else:
+        return path[i + 1]
+
+
+def predFun(node, path):
+    """The predecessor of a node in the path.
+	"""
+    if node not in path:
+        return None
+    i = path.index(node)
+    if i - 1 < 0:
+        return None
+    else:
+        return path[i - 1]
 
 class Demand:
     """ A demand object. Contains the item requested, the path a request follows, as a list, and the
@@ -37,51 +60,31 @@ class Demand:
 
        Attributes:
 	   item: the id of the item requested
-	   path: a list of nodes to be visited
+	   paths: a dict of paths, each path is a list of nodes to be visited
 	   rate: the rate with which this request is generated
-	   query_source: first node on the path
-	   item_source: last node on the path
-   """
-    def __init__(self, item, path, rate):
+	   query_source: node making the request
+	   item_sources: nodes that paths pointing to (designated server)
+    """
+    def __init__(self, demand_id,item, paths, rate):
         """ Initialize a new request.
    	"""
+        self.demand_id = demand_id
         self.item = item
-        self.path = path
+        self.paths = paths
         self.rate = rate
 
-        self.query_source = path[0]
-        self.item_source = path[-1]
+        self.query_source = paths[0][0]
+        self.item_sources = []
+        for path_id in self.paths.keys():
+            if self.paths[path_id][-1] not in self.item_sources:
+                self.item_sources.append(self.paths[path_id][-1])
 
     def __str__(self):
         return Demand.__repr__(self)
 
     def __repr__(self):
         return 'Demand(' + ','.join(map(
-            str, [self.item, self.path, self.rate])) + ')'
-
-    def succ(self, node):
-        """ The successor of a node in the path. 
-   	"""
-        path = self.path
-        if node not in path:
-            return None
-        i = path.index(node)
-        if i + 1 == len(path):
-            return None
-        else:
-            return path[i + 1]
-
-    def pred(self, node):
-        """The predecessor of a node in the path.
-	"""
-        path = self.path
-        if node not in path:
-            return None
-        i = path.index(node)
-        if i - 1 < 0:
-            return None
-        else:
-            return path[i - 1]
+            str, [self.demand_id, self.item, self.paths, self.rate])) + ')'
 
 
 class Message(object):
@@ -117,31 +120,194 @@ class Message(object):
             self.stats, ')'
         ])
 
-
 class QueryMessage(Message):
     """
 	A query message.
    """
-    def __init__(self, d, query_id, stats=None):
+    def __init__(self, d, query_id, stats=None, path_id=0):
         Message.__init__(self,
-                         header=("QUERY", d, query_id),
+                         header=("QUERY", d, query_id, path_id), # path_id denotes which path is used in demand
                          payload=None,
                          length=CONFIG.QUERY_MESSAGE_LENGTH,
                          stats=stats,
                          u_bit=True)
 
-
 class ResponseMessage(Message):
     """
 	A response message.
    """
-    def __init__(self, d, query_id, stats=None):
+    def __init__(self, d, query_id, stats=None, path_id=0):
         Message.__init__(self,
-                         header=("RESPONSE", d, query_id),
+                         header=("RESPONSE", d, query_id, path_id),
                          payload=None,
                          length=CONFIG.RESPONSE_MESSAGE_LENGTH,
                          stats=stats,
                          u_bit=False)
+
+class ExploreMessage(Message):
+    """
+	An exploration message.
+   """
+    def __init__(self, d, query_id, initiator, stats=None, path_id=0):
+        Message.__init__(self,
+                         header=("EXPLORE", d, query_id, path_id),
+                         payload=None,
+                         length=CONFIG.EXPLORE_MESSAGE_LENGTH,
+                         stats=stats,
+                         u_bit=True)
+        self.explore_source = initiator
+
+class ExploreResponseMessage(Message):
+    """
+	An exploration response message.
+   """
+    def __init__(self, d, query_id, initiator, stats=None, path_id=0):
+        Message.__init__(self,
+                         header=("EXPLORE_RESPONSE", d, query_id, path_id),
+                         payload=None,
+                         length=CONFIG.EXPLORE_MESSAGE_LENGTH,
+                         stats=stats,
+                         u_bit=False)
+        self.explore_source = initiator
+    
+    def add_demand(self, d):
+        if d not in self.routing_strategies:
+            logging.debug(pp(['Adding demand', d, 'to router', self._id]))
+            paths = d.routing_info['paths']
+            pathnum = len(paths)
+            if self.initial_state == 'shortest_path':
+                logging.debug(
+                    pp([
+                        ': Initiatizing path strategy to shortest path over',
+                        pathnum, 'paths'
+                    ]))
+                self.routing_strategies[d] = dict([(path_id, 0) for path_id in paths])
+                distances = d.routing_info['distances']
+                shortest_path, shortest_distance = dict_min_val(distances)
+                self.routing_strategies[d][shortest_path] = 1.0
+            else:
+                logging.debug(
+                    pp([
+                        ': Initiatizing path strategy to uniform over',
+                        pathnum, 'paths'
+                    ]))
+                self.routing_strategies[d] = dict([
+                    (path_id, 1.0 / float(pathnum)) for path_id in paths
+                ])
+
+            logging.debug(
+                pp(['Associating router', self._id, 'with demand', d]))
+            d.source_router = self
+    
+    def contains(self, d):
+        return d in self.routing_strategies
+
+    def select_source_route(self, d):
+        logging.debug(
+            pp([
+                'Selecting path for item', d.item,
+                'will follow starting from source router', self._id
+            ]))
+        if self._id != d.query_source:
+            logging.error(
+                pp([
+                    'Demand', d, 'should not be added to router', self._id,
+                    '!!!'
+                ]))
+            return None
+        if not self.contains(d):
+            self.add_demand(d)
+
+        probpicked = random.random()
+        z = self.routing_strategies[d].items()
+        (path_id, prob) = z.pop()
+        probsum = prob
+        #print 'starting at',probsum, 'with total',sum(self.routing_strategies[d].values())
+        while probpicked > probsum and z:
+            #print probpicked,probsum
+            (path_id, prob) = z.pop()
+            probsum += prob
+
+        logging.debug(
+            pp([
+                'Selected path', path_id, ',i.e.,',
+                d.routing_info['paths'][path_id], ', with probability', prob,
+                'for item', d.item, 'will follow from router', self._id
+            ]))
+        return path_id
+
+class DemandRouter:
+    # store and update the routing information for a single demand
+    # as an attribute of G.node[n]['cache'].
+    __metaclass__ = ABCMeta
+
+    def __init__(self,demand_d,routing_type,init_state):
+        self._routingType = routing_type
+        self._demand = demand_d
+        self._pathNumber = len(demand_d.paths.keys())
+        self._routingProb = [] # routing variables
+        self._Score_p = [0.0 for path_id in range(self._pathNumber)] # stores the routing scores collected from explore respond msgs.
+        self._t = 1 # current time slot number
+        self._last_shuffle_time = 0.0
+        self._grad = [0.0 for path_id in range(self._pathNumber)] # estimated subgradients
+        self._pre_projection = [0.0 for path_id in range(self._pathNumber)]
+
+        if init_state == 'uniform':
+            self._routingProb = [1.0 / self._pathNumber for path_id in range(self._pathNumber)]
+        elif init_state == 'shortest_path':
+            self._routingProb = [0.0 for path_id in range(self._pathNumber)]
+            self._routingProb[0] = 1.0
+    
+    def single_route(self):
+        # decide which path for a instance of request, according to probability
+        if self._routingType == 'shortest_path':
+            return 0
+        elif self._routingType == 'source_routing':
+            return np.random.choice(self._pathNumber,p = self._routingProb)
+
+    def AddOnScore_p(self,path_id,val):
+        # add value to routing score p
+        self._Score_p[path_id] += val
+
+    def shuffle(self,time,epsilon=1e-2):
+        # default stepsize 1/sqrt(t)
+        alpha = 0.5/np.sqrt(self._t)
+        self._t += 1
+        if self._demand.demand_id == 1:
+            #print("demand:"+str(self._demand))
+            #print("self._routingProb= "+str(self._routingProb))
+            #print("self._Score_p = "+str(self._Score_p))
+            pass
+
+        # step 1: estimate subgradients
+        T = time - self._last_shuffle_time
+        for path_id in range(self._pathNumber):
+            self._grad[path_id] = -1.0 * self._Score_p[path_id] / T
+        
+        # step 2: compute pre-project variable
+        scale = alpha / (1.0 + np.max(np.abs(np.array(self._grad))))
+        for path_id in range(self._pathNumber):
+            self._pre_projection[path_id] = self._routingProb[path_id] + scale* self._grad[path_id]
+        
+        # step 3: projection
+        sol,res = projectToSimplex_list(self._pre_projection,1.0)
+
+        # step 4: scale so that the sum is 1, reset parameters
+        sum_prob = 0.0
+        for path_id in range(self._pathNumber):
+            if sol[path_id] >= epsilon:
+                self._routingProb[path_id] = sol[path_id]
+                sum_prob += sol[path_id]
+            else:
+                self._routingProb[path_id] = 0.0
+        for path_id in range(self._pathNumber):
+            self._routingProb[path_id] = self._routingProb[path_id] / sum_prob
+        
+        self._Score_p = [0.0 for path_id in range(self._pathNumber)]
+        self._last_shuffle_time = time
+        self._grad = [0.0 for path_id in range(self._pathNumber)] # estimated subgradients
+        self._pre_projection = [0.0 for path_id in range(self._pathNumber)]
+
 
 
 class CacheNetwork(DiGraph):
@@ -172,6 +338,7 @@ class CacheNetwork(DiGraph):
                  weights,
                  delays,
                  T,
+                 routing_type,
                  warmup=0,
                  monitoring_rate=1.0,
                  demand_change_rate=0,
@@ -187,6 +354,7 @@ class CacheNetwork(DiGraph):
         self.demand_change_rate = demand_change_rate
         self.demand_min = demand_min
         self.demand_max = demand_max
+        self.routing_type = routing_type
         
         # parameters used for wireless
         #self.demands = demands
@@ -243,6 +411,14 @@ class CacheNetwork(DiGraph):
 		
 		# initial wireless settings
         self.initWireless(demands=demands)
+
+        # initial routing settings
+        if self.routing_type == 'source_routing' and self.cache_type != 'LMIN':
+            print("Wrong Type: Can not implement "+str(self.cache_type)+" cache with "+str(self.routing_type)+" strategy!")
+            exit()
+        for n in self.nodes():
+            self.node[n]['cache'].router = {}
+        self.initRouting(demands=demands,routing_type=self.routing_type)
         
 
         for d in self.demands:
@@ -266,7 +442,12 @@ class CacheNetwork(DiGraph):
         else:
             self.env.process(self.power_update_process_Priority())
 
-        self.env.process(self.monitor_process())
+        # start routing update process
+        if self.routing_type == 'source_routing':
+            for d in demands:
+                self.env.process(self.route_update_process(d))
+
+        #self.env.process(self.monitor_process())
 
     def initWireless(self, demands, gains = {}, sinr_min = 0.1, sinr_max = 1.0, power_max = 100.0, noise = 1.0):
 		
@@ -279,13 +460,14 @@ class CacheNetwork(DiGraph):
 
 		#print("Network paths:")
 		for d in demands:
-			path_d = d.path
-			#print(path_d)
-			for k in range(len(path_d)-1):
-				v = path_d[k]
-				u = path_d[k+1]
-				self.edge[v][u]['is_in_path'] = 1
-				self.edge[u][v]['is_in_path'] = 1
+			for path_id in d.paths.keys():
+				path_d = d.paths[path_id]
+			    #print(path_d)
+				for k in range(len(path_d)-1):
+					v = path_d[k]
+					u = path_d[k+1]
+					self.edge[v][u]['is_in_path'] = 1
+					self.edge[u][v]['is_in_path'] = 1
 
 		# setup SINR sontraints for each in-path edge
 		for e in self.edges():
@@ -293,7 +475,7 @@ class CacheNetwork(DiGraph):
 			u = e[1]
 			if self.edge[v][u]['is_in_path'] == 1:
 				#self.edge[v][u]['sinrconst'] = random.uniform(sinr_min, sinr_max)
-				self.edge[v][u]['sinrconst'] = 0.05
+				self.edge[v][u]['sinrconst'] = 0.1
 			else:
 				self.edge[v][u]['sinrconst'] = 0
 
@@ -322,9 +504,9 @@ class CacheNetwork(DiGraph):
 			self.PowerFrac[v] = {}
 			for u in self.nodes():
 				if (v,u) in self.edges() and self.edge[v][u]['is_in_path'] == 1:
-					self.PowerFrac[v][u] = self.PowerCap[v] / self.node[v]['out_paths']
+					self.PowerFrac[v][u] = 1.0 / self.node[v]['out_paths']
 				else:
-					self.PowerFrac[v][u] = 0
+					self.PowerFrac[v][u] = 0.0
 		for e in self.edges():
 			v = e[0]
 			u = e[1]
@@ -395,6 +577,7 @@ class CacheNetwork(DiGraph):
 		#print(self.Power_LP_A)
 		#print(self.Power_LP_b)
 		print("Power initialized at time "+str(self.env.now))
+		#print("power initialized to "+str(self.PowerFrac))
   
     def push_power(self):
         # push global power variable to cache and edges
@@ -413,7 +596,7 @@ class CacheNetwork(DiGraph):
         # project and update global power every T 
         while True:
             
-            #print("Power global-updating at time "+str(self.env.now))
+            print("Power global-updating at time "+str(self.env.now))
             # step0: collect power consumption and reset
             self.Current_Power_Consume = 0.0
             for v in self.nodes():
@@ -456,8 +639,8 @@ class CacheNetwork(DiGraph):
             # step3: update global power variable
             w_bar = sol_qp['x']
             #print(Iter)
-            #print(G_qp*w_bar - h_qp)
-            if Iter >= 50 or np.max(G_qp*w_bar - h_qp) > 1.e-9:
+            #print(w_bar)
+            if Iter >= 50 or np.max(G_qp*w_bar - h_qp) > 1.e-5:
                 print("Fail to solve projection at time "+str(self.env.now))
                 #print(G_qp*w_bar - h_qp)
                 yield self.env.timeout(self.T)
@@ -470,7 +653,7 @@ class CacheNetwork(DiGraph):
                         self.PowerFrac[v][u] = w_bar[v * self.graphsize + u]
                     else:
                         self.PowerFrac[v][u] = 0.0
-            #print("self.PowerFrac = "+str(self.PowerFrac))
+            #print("time:"+str(self.env.now)+", self.PowerFrac = "+str(self.PowerFrac))
             
             # step4: push power to caches and edges
             self.push_power()
@@ -494,20 +677,24 @@ class CacheNetwork(DiGraph):
             # step1: collects the caching states and construct LP elements:
             # max sum_f lamb_f sum_k=1^(p-1) t_{i,p,k}
             # s.t. t_{i.p.k} <= 1; t_{i.p.k} <= 1 - w_{p_k+1 p_k} + sum_l=1^k x_{p_l i}; SINR; Powercap
+            
+            
             size_t = 0
             for d in self.demands:
-                size_t += len(d.path)-1
+                path_Priority = d.paths[0] # for priority caches, only shortest path
+                size_t += len(path_Priority)-1
             t_const_1 = np.ones(size_t) # row vector for t <= 1
             t_const_2 = np.zeros(size_t) # row vector for t <= 1-w+sum...
             t_pos = 0
             c_lp = np.zeros(size_t + self.graphsize**2)
             for d in self.demands:
-                for k in [1+i for i in range(len(d.path)-1)]:
+                path_Priority = d.paths[0]
+                for k in [1+i for i in range(len(path_Priority)-1)]:
                     c_lp[t_pos] = -1.0 * d.rate
                     sum_cache = 0.0
                     for l in range(k):
-                        sum_cache += d.item in self.node[d.path[l]]['cache'].cache
-                    t_const_2[t_pos] = 1 - self.PowerFrac[d.path[k]][d.path[k-1]]
+                        sum_cache += d.item in self.node[path_Priority[l]]['cache'].cache
+                    t_const_2[t_pos] = 1 - self.PowerFrac[path_Priority[k]][path_Priority[k-1]]
                     t_pos += 1
             #print("size_t = "+str(size_t)+", t_pos = "+str(t_pos))
             
@@ -536,6 +723,23 @@ class CacheNetwork(DiGraph):
             self.push_power()
             yield self.env.timeout(self.T)
     
+    def initRouting(self,demands,routing_type,init_state = 'shortest_path'):
+        # initialize the demand router and routing variables
+        for d in demands:
+            query_source = d.query_source
+            self.node[query_source]['cache'].router[d] = \
+                DemandRouter(d,routing_type,init_state)
+        print("Router initialized at time "+str(self.env.now))
+
+    def route_update_process(self,d):
+        # update the routing variables every time T
+        query_source = d.query_source
+        while True:
+            yield self.env.timeout(self.T)
+            self.node[query_source]['cache'].router[d].shuffle(self.env.now)
+            
+
+
     def run(self, finish_time):
 
         logging.info('Simulating..')
@@ -548,13 +752,17 @@ class CacheNetwork(DiGraph):
 	    Queries are generated according to a Poisson process with the appropriate rate. Queries generated are pushed to the query source node.
         """
         while True:
+            # first determin which path is routed 
+            query_source = d.query_source
+            path_id = self.node[query_source]['cache'].router[d].single_route()
+
             logging.debug(
                 pp([
-                    self.env.now, ':New query for', d.item, 'to follow', d.path
+                    self.env.now, ':New query for', d.item, 'to follow', d.paths[path_id]
                 ]))
             _id = self.demands[d]['queries_spawned']
             qm = QueryMessage(
-                d, _id)  # create a new query message at the query_source
+                d, _id, path_id = path_id)  # create a new query message at the query_source
             self.demands[d]['pending'].add(_id)
             self.demands[d]['queries_spawned'] += 1
             yield self.node[d.query_source]['pipe'].put(
@@ -567,7 +775,7 @@ class CacheNetwork(DiGraph):
         while True:
             msg = yield self.demands[d]['pipe'].get()
 
-            lab, dem, query_id = msg.header
+            lab, dem, query_id, path_id = msg.header
             stats = msg.stats
             now = self.env.now
 
@@ -591,7 +799,8 @@ class CacheNetwork(DiGraph):
                         'Query', query_id, 'of', d, 'satisfied but not pending'
                     ]))
                 continue
-            else:
+
+            else: # likely, a demand is fufilled
                 self.demands[d]['pending'].remove(query_id)
 
             logging.debug(
@@ -1100,7 +1309,8 @@ class PriorityNetworkCache(NetworkedCache):
         self.permanent_set.add(item)
 
     def receive(self, msg, e, now):
-        label, d, query_id = msg.header
+        label, d, query_id, path_id = msg.header
+        path_curr = d.paths[path_id] # current path is used
 
         if label == "QUERY":
             item = d.item
@@ -1146,7 +1356,8 @@ class PriorityNetworkCache(NetworkedCache):
                     self.stats['history_power_consume'] += 0.0
                     
                 else:
-                    pred = d.pred(self._id)
+                    #pred = d.pred(self._id)
+                    pred = predFun(self._id,path_curr)
                     logging.debug(
                         pp([
                             now, ': Response to query', query_id, 'of', d,
@@ -1157,7 +1368,7 @@ class PriorityNetworkCache(NetworkedCache):
                     self.stats['history_power_consume'] += self.cache._powercap * self.cache._w[pred]
                     
                 e = (self._id, pred)
-                rmsg = ResponseMessage(d, query_id, stats=msg.stats)
+                rmsg = ResponseMessage(d, query_id, stats=msg.stats, path_id= path_id)
                 return [(rmsg, e)]
             else:
                 logging.debug(
@@ -1165,7 +1376,7 @@ class PriorityNetworkCache(NetworkedCache):
                         now, ': Item', item, 'is not inside', self._id,
                         'continue searching'
                     ]))
-                succ = d.succ(self._id)
+                succ = succFun(self._id,path_curr)
                 if succ == None:
                     logging.error(
                         pp([
@@ -1221,46 +1432,15 @@ class PriorityNetworkCache(NetworkedCache):
                         'passes through cache', self._id,
                         'moving further down path'
                     ]))
-                pred = d.pred(self._id)
+                pred = predFun(self._id,path_curr)
                  # respond continue propagates
                 self.stats['history_power_consume'] += self.cache._powercap * self.cache._w[pred]
             e = (self._id, pred)
             return [(msg, e)]
 
 
-class ExploreMessage(Message):
-    """
-	An exploration message.
-   """
-    def __init__(self, d, query_id, initiator, stats=None):
-        Message.__init__(self,
-                         header=("EXPLORE", d, query_id),
-                         payload=None,
-                         length=CONFIG.EXPLORE_MESSAGE_LENGTH,
-                         stats=stats,
-                         u_bit=True)
-        self.explore_source = initiator
-
-
-class ExploreResponseMessage(Message):
-    """
-	An exploration response message.
-   """
-    def __init__(self, d, query_id, initiator, stats=None):
-        Message.__init__(self,
-                         header=("EXPLORE_RESPONSE", d, query_id),
-                         payload=None,
-                         length=CONFIG.EXPLORE_MESSAGE_LENGTH,
-                         stats=stats,
-                         u_bit=False)
-        self.explore_source = initiator
-
-
 class EWMAGradCache(NetworkedCache):
-    """ An EWMA Gradient Networked Cache.
-
-	Note: the capacity of the cache does not include its permanent set; i.e., the capacity concerns only files handled through the EWMA principle.
-    """
+    """ DO NOT USE! Not maintained! """
     def __init__(self, capacity, _id, beta=1.0):
         self.cache = EWMACache(capacity, _id, beta)
         self._id = _id
@@ -1530,7 +1710,8 @@ class LMinCache(NetworkedCache):
         self.permanent_set.add(item)
 
     def receive(self, msg, e, now):
-        label, d, query_id = msg.header
+        label, d, query_id, path_id = msg.header
+        path_curr = d.paths[path_id]
 
         if label == "QUERY":
             msglist = []
@@ -1544,21 +1725,25 @@ class LMinCache(NetworkedCache):
             self.stats['queries'] += 1.0
 
             if self._id == d.query_source:
-                succ = d.succ(self._id)
-                if succ != None:
-                    logging.debug(
-                        pp([
-                            now, ': Item', item, 'is inside cache of ',
-                            self._id,
-                            ' which is the query source, will prepare an exploration message'
-                        ]))
-                    emsg = ExploreMessage(d, query_id, self._id)
-                    e = (self._id, succ)
-                    sumsofar = self.cache.state(item) + float(
-                        item in self.permanent_set)
-                    emsg.payload = sumsofar
-                    if sumsofar < 1.0:
-                        msglist.append((emsg, e))
+                
+                path_number = len(d.paths.keys())
+                # for source_routing, send explore msg to all possible paths
+                for path_id_exp in range(path_number):
+                    succ = succFun(self._id,d.paths[path_id_exp])
+                    if succ != None:
+                        logging.debug(pp([now, ': Item', item, 'is inside cache of ',
+                            self._id,' which is the query source, will prepare an exploration message']))
+                        emsg = ExploreMessage(d, query_id, self._id, path_id=path_id_exp)
+                        e = (self._id, succ)
+                        sumsofar = 1.0 - self.router[d]._routingProb[path_id_exp] + self.cache.state(item) + float(
+                            item in self.permanent_set)
+                        emsg.payload = sumsofar
+                        if sumsofar < 1.0:
+                            msglist.append((emsg, e))
+                        if d.demand_id == 1:
+                            #print("sending explore msg on edge"+str(e)+", with payload "+str(sumsofar))
+                            pass
+               
 
             inside_cache = item in self.cache
             inside_perm = item in self.permanent_set
@@ -1583,7 +1768,7 @@ class LMinCache(NetworkedCache):
                     self.stats['history_power_consume'] += 0.0
                     
                 else:
-                    pred = d.pred(self._id)
+                    pred = predFun(self._id,path_curr)
                     logging.debug(
                         pp([
                             now, ': Response to query', query_id, 'of', d,
@@ -1596,7 +1781,7 @@ class LMinCache(NetworkedCache):
                         pass
                     
                 e = (self._id, pred)
-                rmsg = ResponseMessage(d, query_id, stats=msg.stats)
+                rmsg = ResponseMessage(d, query_id, stats=msg.stats, path_id = path_id)
 
                 msglist.append((rmsg, e))
 
@@ -1606,7 +1791,7 @@ class LMinCache(NetworkedCache):
                         now, ': Item', item, 'is not inside', self._id,
                         'continue searching'
                     ]))
-                succ = d.succ(self._id)
+                succ = succFun(self._id,path_curr)
                 if succ == None:
                     logging.error(
                         pp([
@@ -1649,7 +1834,7 @@ class LMinCache(NetworkedCache):
                         'passes through cache', self._id,
                         'moving further down path'
                     ]))
-                pred = d.pred(self._id)
+                pred = predFun(self._id,path_curr)
                 # for case that a content need further delivery, power consumed
                 self.stats['history_power_consume'] += self.cache._powercap * self.cache._w[pred]
                 if self._id == 1:
@@ -1675,11 +1860,14 @@ class LMinCache(NetworkedCache):
             n_prev = e[0]
             n_curt = e[1]
             Temp = msg.payload + 1 - self.cache._w[n_prev]
+            if d.demand_id == 1:
+                #print("received explore msg on edge"+str(e)+", Temp = "+str(Temp))
+                pass
             if Temp <= 1:
                 B_temp = 1
             else:
                 B_temp = 0
-            self.cache.setB(d,B_temp) # msg.header[1] == d
+            self.cache.setB(d,path_id,B_temp) # msg.header[1] == d
 			# step1 done
 
 			# step2: add the value of B to n_{p_k p_k-1}
@@ -1695,23 +1883,24 @@ class LMinCache(NetworkedCache):
                         now, ': Item', item, 'has aggregate state value',
                         new_sum, 'on node', self._id, 'of demand', d
                     ]))
-                pred = d.pred(self._id)
+                pred = predFun(self._id,path_curr)
                 logging.debug(
                     pp([
                         now, ': Explore Response to query', query_id, 'of', d,
                         ' generated by cache', self._id
                     ]))
                 e = (self._id, pred)
-                ermsg = ExploreResponseMessage(d,
-                                               query_id,
-                                               msg.explore_source,
-                                               stats=msg.stats)
+                ermsg = ExploreResponseMessage(d=d,
+                                               query_id=query_id,
+                                               initiator=msg.explore_source,
+                                               stats=msg.stats, 
+                                               path_id = path_id)
                 ermsg.payload = 0.0
                 return [(ermsg, e)]
             else:
                 logging.debug(pp([now, ': Item', item, 'is has agreggate',
                               new_sum, 'at node', self._id, 'continue exploring']))
-                succ = d.succ(self._id)
+                succ = succFun(self._id,path_curr)
                 if succ == None:
                     logging.error(pp([now, ':Exploration for', query_id, 'of', d,
                                   'reached', self._id, 'and has nowhere to go, will be dropped']))
@@ -1790,14 +1979,16 @@ class LMinCache(NetworkedCache):
                           item, 'with measurement', msg.payload]))
             self.cache.updateGradient(item, msg.payload)
 			# step1 done
-
-			# step2: if B = 1, add payload, otherwise dont
-            if self.cache.getB(d) == 1:
-                #n_curt = e[1]
-                msg.payload += self.cache._powercap #PowerCap[n_curt]
-            # step2 done
+   
+            if d.demand_id == 1:
+                #print("received explore repsond msg on edge"+str(e)+", with payload "+str(msg.payload))
+                pass
 
             if msg.explore_source == self._id:
+                # if reaches the requester, update the routing score
+                #print("score p added:"+str(msg.payload))
+                self.router[d].AddOnScore_p(path_id,msg.payload)
+
                 logging.debug(
                     pp([
                         now, ': Node', self._id,
@@ -1807,13 +1998,19 @@ class LMinCache(NetworkedCache):
                 #logging.debug(pp([now,': Node',self._id,' now stores',self.cache]))
                 return []
 
+            # step2: if B = 1, add payload, otherwise dont
+            if self.cache.getB(d,path_id) == 1:
+                #n_curt = e[1]
+                msg.payload += self.cache._powercap #PowerCap[n_curt]
+            # step2 done
+
             logging.debug(
                 pp([
                     now, ': Explore Response to query', query_id, 'of', d,
                     'passes through cache', self._id,
                     'moving further down path'
                 ]))
-            pred = d.pred(self._id)
+            pred = predFun(self._id,path_curr)
             e = (self._id, pred)
             return [(msg, e)]
         
@@ -1823,7 +2020,7 @@ class LMinCache(NetworkedCache):
 
 	   It is effectively a wrapper for a receive call, made to a NetworkedCache object. 
 
-	"""
+	    """
         while True:
             logging.debug(
                 pp([self.env.now, ': New suffling of cache', self._id]))
@@ -1877,11 +2074,11 @@ def main():
                         type=float,
                         help='Minimum edge weight')
     parser.add_argument('--max_rate',
-                        default=1.0,
+                        default=5.0,
                         type=float,
                         help='Maximum demand rate')
     parser.add_argument('--min_rate',
-                        default=1.0,
+                        default=5.0,
                         type=float,
                         help='Minimum demand rate')
     parser.add_argument('--time',
@@ -1994,6 +2191,18 @@ def main():
                         default=5.,
                         type=float,
                         help='Suffling period used in LMIN')
+    parser.add_argument(
+        '--routing_strategy',
+        default='shortest_path',
+        type=str,
+        help='routing strategy',
+        choices=['shortest_path', 'source_routing'])
+    parser.add_argument(
+        '--path_number',
+        default=3,
+        type=int,
+        help='number of paths each demand, for source_routing strategy')
+    
     args = parser.parse_args()
 
     args.debug_level = eval("logging." + args.debug_level)
@@ -2146,19 +2355,43 @@ def main():
         if x < remainder:
             dem = dem + 1
 
-        new_dems = [
-            Demand(
-                items_requested[pos],
-                shortest_path(G,
-                              x,
-                              item_sources[items_requested[pos]][0],
-                              weight='weight'),
-                random.uniform(args.min_rate, args.max_rate))
-            for pos in range(len(demands),
-                             len(demands) + dem)
-        ]
-        logging.debug(pp(new_dems))
+        new_dems = []
+        for pos in range(len(demands),len(demands) + dem):
+            #print("pos:"+str(pos))
+            i = items_requested[pos]
+            rate = random.uniform(args.min_rate, args.max_rate)
+            paths = {}
+            path_shorthest = shortest_path(G,x,item_sources[items_requested[pos]][0],weight='weight')
+            paths[0] = path_shorthest
+            path_id = 1
+            if args.routing_strategy == 'shortest_path':
+                pass
+            elif args.routing_strategy == 'source_routing':
+                for path_new in all_simple_paths(G,x,item_sources[items_requested[pos]][0]):
+                    if path_new != path_shorthest and path_id < args.path_number:
+                        paths[path_id] = path_new
+                        path_id += 1
+            else:
+                print("unvalid routing strategy!")
+                return
+            new_dem = Demand(pos,i,paths,rate)
+            #logging.debug(pp(new_dem))
+            new_dems.append(new_dem)
         demands = demands + new_dems
+    #print(demands)    
+        #new_dems = [
+        #    Demand(
+        #        items_requested[pos],
+        #        shortest_path(G,
+        #                      x,
+        #                      item_sources[items_requested[pos]][0],
+        #                      weight='weight'),
+        #        random.uniform(args.min_rate, args.max_rate))
+        #    for pos in range(len(demands),
+        #                     len(demands) + dem)
+        #]
+        #logging.debug(pp(new_dems))
+        #demands = demands + new_dems
 
     logging.info('...done. Generated %d demands' % len(demands))
     #plt.hist([ d.item for d in demands], bins=np.arange(args.catalog_size)+0.5)
@@ -2176,21 +2409,25 @@ def main():
 
     logging.info('Building CacheNetwork')
     cnx = CacheNetwork(G, args.cache_type ,cacheGenerator, demands, item_sources, capacities,
-                       weights, weights, args.T, args.warmup, args.monitoring_rate,
+                       weights, weights, args.T, args.routing_strategy, args.warmup, args.monitoring_rate,
                        args.demand_change_rate, args.min_rate, args.max_rate)
     logging.info('...done')
 
-    Y, res = cnx.minimizeRelaxation()
-
-    logging.info('Optimal Relaxation is: ' + str(cnx.relaxation(Y)))
-    logging.info('Expected caching gain at relaxation point is: ' +
-                 str(cnx.expected_caching_gain(Y)))
-
+    # compute offline optimal solution
+    #Y, res = cnx.minimizeRelaxation()
+    #logging.info('Optimal Relaxation is: ' + str(cnx.relaxation(Y)))
+    #logging.info('Expected caching gain at relaxation point is: ' +
+    #             str(cnx.expected_caching_gain(Y)))
+    #optimal_stats = {}
+    #optimal_stats['res'] = res
+    #optimal_stats['Y'] = Y
+    #optimal_stats['L'] = cnx.relaxation(Y)
+    #optimal_stats['F'] = cnx.expected_caching_gain(Y)
     optimal_stats = {}
-    optimal_stats['res'] = res
-    optimal_stats['Y'] = Y
-    optimal_stats['L'] = cnx.relaxation(Y)
-    optimal_stats['F'] = cnx.expected_caching_gain(Y)
+    optimal_stats['res'] = None
+    optimal_stats['Y'] = None
+    optimal_stats['L'] = None
+    optimal_stats['F'] = None
 
     if args.cache_type == "LMIN":
         for x in cnx.nodes():
@@ -2232,6 +2469,8 @@ def main():
         node_stats[x] = cnx.node[x]['cache'].stats
 
     network_stats['demand'] = cnx.demandstats
+    #network_stats['fun'] = cnx.funstats
+    #network_stats['opt'] = cnx.optstats
     network_stats['fun'] = cnx.funstats
     network_stats['opt'] = cnx.optstats
 
@@ -2246,21 +2485,6 @@ def main():
             network_stats
         ], f)
 
-
-#   for d in cnx.demands:
-#	print d.item, d.rate, d.requests_tally.count()/time, len(d.path), d.hops_tally.mean(), d.weight_tally.mean(), d.time_tally.mean(), d.hit_source_tally.mean()
-
-#   for x in cnx.nodes():
-#	cache = cnx.node[x]['cache']
-#	print x,cache.queries_tally.count(), cache.hits_tally.mean(), cache.downloads_tally.count()/time
-
-#def plot_ecdf(y,x_label):
-#     ecdf = ECDF(y)
-#     x= sorted(list(set(y)))
-#     plt.plot(x,ecdf(x))
-#     plt.xlabel(x_label)
-#     plt.ylabel('CDF')
-#     plt.show()
 
 if __name__ == "__main__":
     main()

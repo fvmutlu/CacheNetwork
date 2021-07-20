@@ -4,6 +4,7 @@
 '''
 from abc import ABCMeta, abstractmethod
 from Caches import PriorityCache, EWMACache, LMinimalCache
+from helpers import uniqueify
 from networkx import Graph, DiGraph, shortest_path
 import networkx
 import random
@@ -235,12 +236,15 @@ class CacheNetwork(DiGraph):
                           A is a matrix populated with coefficients made of gains and SINR constraints, b is a vector of SINR constraints times noise and s is the vector of power variables, ordered by edge number found in self.edges()
         """
         self.isWireless = True
+        # Wireless stats dict
+        self.wirelessStats = {}
+        self.wirelessStats['power_by_slot'] = []
+        self.wirelessStats['frac_by_slot'] = []
         # Additional wireless parameters
         self.T = T
         self.graphsize = V
         self.PowerCap = [power_max] * V
         self.PowerFrac = {}
-        #self.PowerFrac_pre_projection = {}
         self.Power_LP_A = 0.0 * np.identity(self.graphsize**2)
         self.Power_LP_b = 0.0 * np.arange(self.graphsize**2)
         self.A_nonnegative = np.identity(self.graphsize**2)
@@ -253,9 +257,6 @@ class CacheNetwork(DiGraph):
         self.Global_Power_Consume = 0.0 # the averaged global power consumption till the end of last time slot
         self.Current_Power_Consume = 0.0 # used to compute power consumption during last time slot
         self.noise = noise
-        
-        #self.A = [[0]*len(self.edges()) for i in range(len(self.edges()))]
-        #self.b = [0]*len(self.edges())
         
         # Identify the edges that used in a path
         for e in self.edges():
@@ -313,7 +314,6 @@ class CacheNetwork(DiGraph):
             u = e[1]
             self.edge[v][u]['power'] = self.PowerCap[v] * self.PowerFrac[v][u]
             self.edge[v][u]['gain'] = gains[e]
-            #self.edge[v][u]['gain'] = 1.0 # temp setting
             self.WirelessGain[v][u] = gains[e]
 
         # Push power to each node
@@ -391,6 +391,7 @@ class CacheNetwork(DiGraph):
                     self.w_gradient[v][u] = 0.0
             self.w_tilde = [0.0 for i in range(self.graphsize **2)]
             print("Time-averaged power consumption in last time slot ="+str((self.Current_Power_Consume - self.Global_Power_Consume)/self.T))
+            self.wirelessStats['power_by_slot'].append((self.Current_Power_Consume - self.Global_Power_Consume)/self.T)
             self.Global_Power_Consume = self.Current_Power_Consume
             
             # step1: pull n-scores from each node and compute estimated subgradient from 
@@ -442,6 +443,7 @@ class CacheNetwork(DiGraph):
                     else:
                         self.PowerFrac[v][u] = 0.0
             #print("self.PowerFrac = "+str(self.PowerFrac))
+            self.wirelessStats['frac_by_slot'].append(self.PowerFrac)
             
             # step4: push power to caches and edges
             self.push_power()
@@ -460,6 +462,7 @@ class CacheNetwork(DiGraph):
                     self.w_gradient[v][u] = 0.0
             self.w_tilde = [0.0 for i in range(self.graphsize **2)]
             print("Time-averaged power consumption in last time slot ="+str((self.Current_Power_Consume - self.Global_Power_Consume)/self.T))
+            self.wirelessStats['power_by_slot'].append((self.Current_Power_Consume - self.Global_Power_Consume)/self.T)
             self.Global_Power_Consume = self.Current_Power_Consume
             
             # step1: collects the caching states and construct LP elements:
@@ -503,7 +506,8 @@ class CacheNetwork(DiGraph):
             for v in self.nodes():
                 for u in self.nodes():
                     self.PowerFrac[v][u] = sol_lp['x'][size_t + v*self.graphsize +u]
-            
+
+            self.wirelessStats['frac_by_slot'].append(self.PowerFrac)            
             self.push_power()
             yield self.env.timeout(self.T)
 
@@ -1832,30 +1836,44 @@ def main():
 
     cnx.run(args.time)
 
-    demand_stats = {}
-    node_stats = {}
-    network_stats = {}
+    if args.graph_type == 'hetnet':
+        out = args.outputfile + "%s_%s" % (args.graph_type, args.cache_type)
+        if args.hetnet_load is not None:
+            out += args.hetnet_load.split("topfiles/top")[1]
+        else:
+            top_file = 'topfiles/top_V' + str(args.graph_size) + '_SC' + str(int(args.hetnet_params[0])) + '_R' + str(args.hetnet_params[1]) + '_exp' + str(args.hetnet_params[2])
+            top_file = uniqueify(top_file, 'last')
+            out += top_file.split("topfiles/top")[1]        
+        out += "_%ditems_%ddemands_%ftime_%fpcap_%fsinr_%dcachecap" % (args.catalog_size, args.demand_size, args.time,
+            args.wireless_consts[0], args.wireless_consts[1], args.max_capacity)
 
-    for d in cnx.demands:
-        demand_stats[str(d)] = cnx.demands[d]['stats']
-        demand_stats[str(
-            d)]['queries_spawned'] = cnx.demands[d]['queries_spawned']
-        demand_stats[str(
-            d)]['queries_satisfied'] = cnx.demands[d]['queries_satisfied']
+        with open(out, 'wb+') as f:
+            pickle.dump([args, cnx.wirelessStats], f)
+    else:
+        demand_stats = {}
+        node_stats = {}
+        network_stats = {}
 
-    for x in cnx.nodes():
-        node_stats[x] = cnx.node[x]['cache'].stats
+        for d in cnx.demands:
+            demand_stats[str(d)] = cnx.demands[d]['stats']
+            demand_stats[str(
+                d)]['queries_spawned'] = cnx.demands[d]['queries_spawned']
+            demand_stats[str(
+                d)]['queries_satisfied'] = cnx.demands[d]['queries_satisfied']
 
-    network_stats['demand'] = cnx.demandstats
-    network_stats['fun'] = cnx.funstats
-    network_stats['opt'] = cnx.optstats
+        for x in cnx.nodes():
+            node_stats[x] = cnx.node[x]['cache'].stats
 
-    out = args.outputfile+"%s_%s_%ditems_%dnodes_%dquerynodes_%ddemands_%ftime_%fchange_%fgamma_%fexpon%fbeta" % (
-        args.graph_type, args.cache_type, args.catalog_size, args.graph_size, args.query_nodes, args.demand_size, args.time, args.demand_change_rate, args.gamma, args.expon, args.beta)
+        network_stats['demand'] = cnx.demandstats
+        network_stats['fun'] = cnx.funstats
+        network_stats['opt'] = cnx.optstats
 
-    with open(out, 'wb') as f:
-        pickle.dump([args, construct_stats, optimal_stats,
-                    demand_stats, node_stats, network_stats], f)
+        out = args.outputfile+"%s_%s_%ditems_%dnodes_%dquerynodes_%ddemands_%ftime_%fchange_%fgamma_%fexpon%fbeta" % (
+            args.graph_type, args.cache_type, args.catalog_size, args.graph_size, args.query_nodes, args.demand_size, args.time, args.demand_change_rate, args.gamma, args.expon, args.beta)
+
+        with open(out, 'wb') as f:
+            pickle.dump([args, construct_stats, optimal_stats,
+                        demand_stats, node_stats, network_stats], f)
 
 #   for d in cnx.demands:
 #	print d.item, d.rate, d.requests_tally.count()/time, len(d.path), d.hops_tally.mean(), d.weight_tally.mean(), d.time_tally.mean(), d.hit_source_tally.mean()

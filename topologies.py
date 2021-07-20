@@ -2,6 +2,7 @@ from networkx import Graph, selfloop_edges, shortest_path
 import numpy as np
 import time
 import pickle
+from helpers import uniqueify
 
 def Dtelekom():
     G = Graph()
@@ -509,6 +510,7 @@ def HetNet(V, SC, R_cell, pathloss_exponent):
         G.edges[v,u]['cost'] = 1/G.edges[v,u]['gain']
     
     top_file = 'topfiles/top_V' + str(V) + '_SC' + str(SC) + '_R' + str(R_cell) + '_exp' + str(pathloss_exponent)
+    top_file = uniqueify(top_file, 'new')
      
     with open(top_file,'wb+') as f:
         pickle.dump(G, f)

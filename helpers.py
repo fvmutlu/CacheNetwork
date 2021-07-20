@@ -2,6 +2,7 @@ from cvxopt import solvers
 from cvxopt import matrix
 import numpy as np
 from scipy.stats import rv_discrete
+from os.path import abspath, exists
 #from scipy.spatial import Voronoi
 #from scipy.spatial import voronoi_plot_2d
 #from shapely.geometry import Point, MultiPoint, Polygon
@@ -94,4 +95,23 @@ def constructDistribution(d, cap):
 
     return placements, prob, rv_discrete(values=(list(prob.keys()), list(prob.values())))
 
+def uniqueify(path, mode):
+    filename = abspath(path)
+    counter = 1
+
+    if mode == 'new':
+        while exists(path):
+            path = filename + "_(" + str(counter) + ")"
+            counter += 1
+        return path
+    elif mode == 'last':
+        while True:
+            if exists(filename + "_(" + str(counter) + ")"):
+                path = filename + "_(" + str(counter) + ")"
+                counter += 1
+            else:
+                return path
+
+
+    
     

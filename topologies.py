@@ -472,7 +472,7 @@ def GEANT():
     G.add_edge("nodeK", "nodeL")
     return G
 
-def HetNet(V, SC, R_cell, pathloss_exponent):
+def HetNet(V, SC, R_cell, pathloss_exponent, mode):
     np.random.seed(int(time.time()))
     # Initialize graph
     G = Graph()
@@ -500,14 +500,28 @@ def HetNet(V, SC, R_cell, pathloss_exponent):
     # Assign node positions
     # Currently completely randomizes uniformly inside square
     #G.nodes["nodeBH"]['pos'] = (0.001,0.001)
-    G.nodes["nodeMC"]['pos'] = (0,0)
     for n in G.nodes():
         G.nodes[n]['pos'] = np.random.uniform(-R_cell,R_cell,2)
+    G.nodes["nodeMC"]['pos'] = np.array([0,0])
+    if mode == 'grid':
+        if np.sqrt(SC+1) == int(np.sqrt(SC+1)):
+            x, y = np.meshgrid(np.linspace(-R_cell,R_cell,int(np.sqrt(SC+1))), np.linspace(R_cell,-R_cell,int(np.sqrt(SC+1))))
+            pos_list = []
+            for i in range(int(np.sqrt(SC+1))):
+                for j in range(int(np.sqrt(SC+1))):
+                    if (x[0][i] != 0.0) or (y[j][0] != 0.0):
+                        pos_list.append(np.array([x[0][i],y[j][0]]))
+            for n in range(SC):
+                G.nodes["nodeSC"+str(n)]['pos'] = pos_list[n]
+        else:
+            print("Number of small cells not equal to a square number - 1")
+            raise AssertionError()
         
     # Assign edge gains
     for (v,u) in G.edges():
         G.edges[v,u]['gain'] = min( 1, np.linalg.norm( G.nodes[v]['pos'] - G.nodes[u]['pos'] ) ** (-pathloss_exponent) )
         G.edges[v,u]['cost'] = 1/G.edges[v,u]['gain']
+        #print(G.edges[v,u]['gain'])
     
     top_file = 'topfiles/top_V' + str(V) + '_SC' + str(SC) + '_R' + str(R_cell) + '_exp' + str(pathloss_exponent)
     top_file = uniqueify(top_file, 'new')

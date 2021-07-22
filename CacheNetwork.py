@@ -223,7 +223,7 @@ class CacheNetwork(DiGraph):
 
         self.env.process(self.monitor_process())
 
-    def initWireless(self, T, V, SC, gains, cache_type, power_max = 10, sinr = 0.1, noise = 1.0):
+    def initWireless(self, T, V, SC, gains, cache_type, power_max = 10, sinr = 0.1, noise = 0.1):
         """ Separate init function for wireless scenario.
         
             Sets/constructs the following parameters/variables:
@@ -243,7 +243,8 @@ class CacheNetwork(DiGraph):
         # Additional wireless parameters
         self.T = T
         self.graphsize = V
-        self.PowerCap = [power_max] * V
+        #self.PowerCap = [power_max * 3] + [power_max] * int(SC) + [0]*(V-int(SC)-1)
+        self.PowerCap = [power_max * 3] + [power_max] * (V-1)
         self.PowerFrac = {}
         self.Power_LP_A = 0.0 * np.identity(self.graphsize**2)
         self.Power_LP_b = 0.0 * np.arange(self.graphsize**2)
@@ -306,35 +307,47 @@ class CacheNetwork(DiGraph):
             self.PowerFrac[v] = {}
             for u in self.nodes():
                 if (v,u) in self.edges() and self.edge[v][u]['is_in_path'] == 1:
-                    self.PowerFrac[v][u] = self.PowerCap[v] / self.node[v]['out_paths']
+                    self.PowerFrac[v][u] = 1.0 / self.node[v]['out_paths']
                 else:
-                    self.PowerFrac[v][u] = 0
+                    self.PowerFrac[v][u] = 0.0
         for e in self.edges():
             v = e[0]
             u = e[1]
             self.edge[v][u]['power'] = self.PowerCap[v] * self.PowerFrac[v][u]
             self.edge[v][u]['gain'] = gains[e]
             self.WirelessGain[v][u] = gains[e]
+            """ if self.edge[v][u]['is_in_path'] == 1:
+                self.edge[v][u]['gain'] = 1.0
+                self.WirelessGain[v][u] = 1.0
+            else:
+                self.edge[v][u]['gain'] = 0
+                self.WirelessGain[v][u] = 0 """
 
         # Push power to each node
         self.push_power()
         for i, e in enumerate(self.edges()):
             v = e[0]
             u = e[1]
-            self.Power_LP_b[i] = self.edge[v][u]['sinrconst'] * self.noise
-            self.Power_LP_A[i][v * self.graphsize + u] = 1.0 * self.WirelessGain[v][u] * self.PowerCap[v]
+            self.Power_LP_b[i] = -1.0 * self.edge[v][u]['sinrconst'] * self.noise
+            self.Power_LP_A[i][v * self.graphsize + u] += -1.0 * self.WirelessGain[v][u] * self.PowerCap[v]
             for up in self.nodes():
                 if up != u:
-                    self.Power_LP_A[i][v * self.graphsize + up] = -1.0 * self.edge[v][u]['sinrconst'] * self.WirelessGain[v][u] * self.PowerCap[v]
+                    self.Power_LP_A[i][v * self.graphsize + up] += 1.0 * self.edge[v][u]['sinrconst'] * self.WirelessGain[v][u] * self.PowerCap[v]
             for vp in self.nodes():
                 if vp != v:
                     for up in self.nodes():
-                        self.Power_LP_A[i][vp * self.graphsize + up] = -1.0* self.edge[v][u]['sinrconst'] * self.WirelessGain[vp][u] * self.PowerCap[vp]
+                        self.Power_LP_A[i][vp * self.graphsize + up] += 1.0* self.edge[v][u]['sinrconst'] * self.WirelessGain[vp][u] * self.PowerCap[vp]
         
         for v in self.nodes():
             for u in self.nodes():
                 self.A_powercap[v][v * self.graphsize + u] = -1.0
-        self.b_powercap = -1.0 * np.ones(self.graphsize)
+
+        self.A_nonnegative = -1.0* np.identity(self.graphsize **2)
+        self.b_nonnegative = np.zeros(self.graphsize ** 2)
+        self.A_powercap = np.kron(np.eye(self.graphsize) , np.ones((1,self.graphsize)))
+        self.b_powercap = np.ones(self.graphsize)
+        
+        #self.b_powercap = -1.0 * np.ones(self.graphsize)
         print("Power initialized at time "+str(self.env.now))
         
         """ for i, e in enumerate(self.edges()):
@@ -362,7 +375,8 @@ class CacheNetwork(DiGraph):
         if cache_type == 'LMIN':
             self.env.process(self.power_update_process_LMIN())
         else:
-            self.env.process(self.power_update_process_Priority())
+            #self.env.process(self.power_update_process_Priority())
+            self.env.process(self.power_update_process_Priority_MinC())
         
     def push_power(self):
         for v in self.nodes():
@@ -409,29 +423,31 @@ class CacheNetwork(DiGraph):
                     self.w_tilde[v*self.graphsize+u] = self.PowerFrac[v][u] + alpha* self.w_gradient[v][u]
             #print("w_tilde = "+str(self.w_tilde))    
             
-            # step3: project w_tilde vector into constraint set Aw>=b, i.e. min w'Pw + Q'w, s.t. Gw <= h
+            # step3: project w_tilde vector into constraint set Aw<=b, i.e. min w'Pw + Q'w, s.t. Gw <= h
             Q_qp = matrix(-2.0 * np.transpose(np.array(self.w_tilde)))
             
             P_qp = matrix(np.identity(self.graphsize ** 2))
             
             
-            G_qp = matrix( -1.0 * np.vstack((self.Power_LP_A, self.A_nonnegative, self.A_powercap)))
+            #G_qp = matrix( -1.0 * np.vstack((self.Power_LP_A, self.A_nonnegative, self.A_powercap)))
+            #G_qp = matrix( -1.0 * np.vstack((self.Power_LP_A, self.A_nonnegative, self.A_powercap, -1.0*self.A_powercap)))
             #G_qp = matrix( -1.0 * np.vstack((self.A_nonnegative, self.A_powercap)))
-            
+            G_qp = matrix( np.vstack((self.Power_LP_A, self.A_nonnegative, self.A_powercap)))  
            
-            h_qp = matrix( -1.0 * np.transpose(np.hstack((self.Power_LP_b, self.b_nonnegative, self.b_powercap))))
+            #h_qp = matrix( -1.0 * np.transpose(np.hstack((self.Power_LP_b, self.b_nonnegative, self.b_powercap))))
+            #h_qp = matrix( -1.0 * np.transpose(np.hstack((self.Power_LP_b, self.b_nonnegative, self.b_powercap, -1.0*self.b_powercap))))
             #h_qp = matrix( -1.0 * np.transpose(np.hstack((self.b_nonnegative, self.b_powercap))))
-            
+            h_qp = matrix( np.transpose(np.hstack((self.Power_LP_b, self.b_nonnegative, self.b_powercap))))            
             
             sol_qp = qp(P_qp, Q_qp, G_qp, h_qp, options={'show_progress': False})
             Iter = sol_qp['iterations']            
             # step3: update global power variable
             w_bar = sol_qp['x']
             #print(Iter)
-            #print(G_qp*w_bar - h_qp)
-            if Iter >= 150 or np.max(G_qp*w_bar - h_qp) > 1.e-9:
+            #print(np.max(G_qp*w_bar - h_qp))
+            #if Iter >= 200:
+            if Iter >= 100 or np.max(G_qp*w_bar - h_qp) > 1.e-9:
                 print("Fail to solve projection at time "+str(self.env.now))
-                #print(G_qp*w_bar - h_qp)
                 yield self.env.timeout(self.T)
                 continue
 
@@ -508,6 +524,56 @@ class CacheNetwork(DiGraph):
                     self.PowerFrac[v][u] = sol_lp['x'][size_t + v*self.graphsize +u]
 
             self.wirelessStats['frac_by_slot'].append(self.PowerFrac)            
+            self.push_power()
+            yield self.env.timeout(self.T)
+
+    def power_update_process_Priority_MinC(self):
+        # Centralized power updating for other cache types
+        while(True):
+            # step0: collect power consumption and reset
+            self.Current_Power_Consume = 0.0
+            for v in self.nodes():
+                self.Current_Power_Consume += self.node[v]['cache'].stats['history_power_consume']
+                self.w_gradient[v] = {}
+                for u in self.nodes():
+                    self.w_gradient[v][u] = 0.0
+            self.w_tilde = [0.0 for i in range(self.graphsize **2)]
+            print("Time-averaged power consumption in last time slot ="+str((self.Current_Power_Consume - self.Global_Power_Consume)/self.T))
+            self.Global_Power_Consume = self.Current_Power_Consume
+            
+            # step1: collects the caching states and construct LP elements:
+            # min sum_(i,p) lambda_(i,p) sum_k s_bar_p_k+1 w_{p_k+1 p_k} prod_l (1 - x_{p_l i})
+            # s.t. w >= 0, sum w <= 1, SINR
+            w_len = self.graphsize **2
+            c_minC = np.zeros(w_len)
+            for d in self.demands.keys():
+                rate = d.rate
+                path = d.path
+                item = d.item
+                for k in range(1,len(path)-1):
+                    cache_product = 1.0
+                    for l in range(1,k):
+                        cache_product = cache_product * (1.0 - item in self.node[path[l-1]]['cache'].cache)
+                    v = path[k]
+                    u = path[k-1]
+                    c_minC[ v * self.graphsize + u] += rate * self.PowerCap[v] * cache_product
+            
+            # step2: solve LP: min cTx , s.t. Gx <= h
+            G_lp = matrix( np.vstack((self.Power_LP_A, self.A_nonnegative, self.A_powercap)))
+            h_lp = matrix( np.transpose(np.hstack((self.Power_LP_b, self.b_nonnegative, self.b_powercap))))
+            
+            c_lp = matrix(np.transpose(c_minC))
+            #print("c_lp = "+str(c_lp))
+            #print("G_lp = "+str(G_lp))
+            #print("h_lp = "+str(h_lp))
+            
+            sol_lp = lp(c = c_lp, G = G_lp, h = h_lp, options={'show_progress': False})
+            
+            # step3: update power variables
+            for v in self.nodes():
+                for u in self.nodes():
+                    self.PowerFrac[v][u] = sol_lp['x'][v*self.graphsize +u]
+            
             self.push_power()
             yield self.env.timeout(self.T)
 
@@ -1070,7 +1136,8 @@ class PriorityNetworkCache(NetworkedCache):
                     return []
 
                 # query continue propagates
-                self.stats['history_power_consume'] += self.cache._powercap * self.cache._w[succ]
+                #self.stats['history_power_consume'] += self.cache._powercap * self.cache._w[succ]
+                self.stats['history_power_consume'] += 0.0
 
                 e = (self._id, succ)
                 return [(msg, e)]
@@ -1586,6 +1653,7 @@ def main():
     parser.add_argument('--wireless_consts', nargs='+', default=[10.0,0.1],
                         type=float, help='Constraints for wireless case as tuple (max_power,sinr). Ex: 10.0 0.1')
     parser.add_argument('--hetnet_load', type=str, help='Path to hetnet topology file')
+    parser.add_argument('--hetnet_grid', help='Whether the hetnet topology should be a grid', default=False, action='store_true')
     
     parser.add_argument('--graph_degree', default=4, type=int,
                         help='Degree. Used by balanced_tree, regular, barabasi_albert, watts_strogatz')
@@ -1665,10 +1733,14 @@ def main():
         if args.graph_type == 'servicenetwork':
             return topologies.ServiceNetwork()
         if args.graph_type == 'hetnet':
+            print(args.hetnet_grid)
             if args.hetnet_load is not None:
                 return topologies.LoadHetNet(args.hetnet_load)
             else:
-                return topologies.HetNet(args.graph_size, int(args.hetnet_params[0]), args.hetnet_params[1], args.hetnet_params[2])
+                if args.hetnet_grid:
+                    return topologies.HetNet(args.graph_size, int(args.hetnet_params[0]), args.hetnet_params[1], args.hetnet_params[2], 'grid')
+                else:
+                    return topologies.HetNet(args.graph_size, int(args.hetnet_params[0]), args.hetnet_params[1], args.hetnet_params[2], 'random')
 
     def cacheGenerator(capacity, _id):
         if args.cache_type == 'LRU':

@@ -1,5 +1,6 @@
-python2 CacheNetwork.py outputfile --graph_type abilene --debug_level ERROR --cache_type LMIN --routing_strategy source_routing --path_number 1 --min_capacity 3 --max_capacity 3 --query_nodes 3 --catalog_size 30 --demand_size 40 --max_weight 100 --time 25 --T 10
-python2 CacheNetwork.py outputfile --graph_type geant --debug_level ERROR --cache_type LMIN routing_strategy source_routing --min_capacity 3 --max_capacity 3 --query_nodes 10 --catalog_size 50 --demand_size 100 --max_weight 100 --time 500 --T 10
+python2 CacheNetwork.py outputfile --graph_type abilene --debug_level ERROR --cache_type LMIN --min_capacity 3 --max_capacity 3 --query_nodes 3 --catalog_size 30 --demand_size 40 --max_weight 100 --time 25 --T 10
+python2 CacheNetwork.py outputfile --graph_type abilene --debug_level ERROR --cache_type LRU --min_capacity 3 --max_capacity 3 --query_nodes 3 --catalog_size 30 --demand_size 40 --max_weight 100 --time 25 --T 10
+python2 CacheNetwork.py outputfile --graph_type geant --debug_level ERROR --cache_type LMIN --min_capacity 3 --max_capacity 3 --query_nodes 10 --catalog_size 50 --demand_size 100 --max_weight 100 --time 500 --T 10
 
 alpha = 0.05
 T=500, Cost=31.569

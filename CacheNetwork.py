@@ -274,9 +274,9 @@ class DemandRouter:
         alpha = 0.5/np.sqrt(self._t)
         self._t += 1
         if self._demand.demand_id == 1:
-            #print("demand:"+str(self._demand))
-            #print("self._routingProb= "+str(self._routingProb))
-            #print("self._Score_p = "+str(self._Score_p))
+            print("demand:"+str(self._demand))
+            print("self._routingProb= "+str(self._routingProb))
+            print("self._Score_p = "+str(self._Score_p))
             pass
 
         # step 1: estimate subgradients
@@ -475,7 +475,7 @@ class CacheNetwork(DiGraph):
 			u = e[1]
 			if self.edge[v][u]['is_in_path'] == 1:
 				#self.edge[v][u]['sinrconst'] = random.uniform(sinr_min, sinr_max)
-				self.edge[v][u]['sinrconst'] = 0.1
+				self.edge[v][u]['sinrconst'] = 0.05
 			else:
 				self.edge[v][u]['sinrconst'] = 0
 
@@ -629,10 +629,10 @@ class CacheNetwork(DiGraph):
             P_qp = matrix(np.identity(self.graphsize ** 2))
             
             G_qp = matrix( -1.0 * np.vstack((self.Power_LP_A, self.A_nonnegative, self.A_powercap)))
-            #G_qp = matrix( -1.0 * np.vstack((self.A_nonnegative, self.A_powercap)))
+            G_qp = matrix( -1.0 * np.vstack((self.Power_LP_A, self.A_nonnegative, self.A_powercap, -1.0*self.A_powercap)))
            
             h_qp = matrix( -1.0 * np.transpose(np.hstack((self.Power_LP_b, self.b_nonnegative, self.b_powercap))))
-            #h_qp = matrix( -1.0 * np.transpose(np.hstack((self.b_nonnegative, self.b_powercap))))
+            h_qp = matrix( -1.0 * np.transpose(np.hstack((self.Power_LP_b, self.b_nonnegative, self.b_powercap, -1.0*self.b_powercap))))
             
             sol_qp = qp(P_qp, Q_qp, G_qp, h_qp,options={'show_progress': False})
             Iter = sol_qp['iterations']
@@ -653,7 +653,7 @@ class CacheNetwork(DiGraph):
                         self.PowerFrac[v][u] = w_bar[v * self.graphsize + u]
                     else:
                         self.PowerFrac[v][u] = 0.0
-            #print("time:"+str(self.env.now)+", self.PowerFrac = "+str(self.PowerFrac))
+            print("time:"+str(self.env.now)+", self.PowerFrac = "+str(self.PowerFrac))
             
             # step4: push power to caches and edges
             self.push_power()

@@ -46,6 +46,8 @@ if __name__ == '__main__':
         else:
             s = [args.graph_size, *args.hetnet_params]
 
+        print(wirelessStats['w_by_slot'])
+        print(wirelessStats['w_by_slot'][-1])
         if myargs.mode=='barcomp':
             res[args.cache_type] = np.mean(wirelessStats['power_by_slot'][-6:-1])
         elif myargs.mode=='sinr':

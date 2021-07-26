@@ -223,7 +223,7 @@ class CacheNetwork(DiGraph):
 
         self.env.process(self.monitor_process())
 
-    def initWireless(self, T, V, SC, gains, cache_type, power_max = 10, sinr = 0.1, noise = 0.1):
+    def initWireless(self, T, V, SC, gains, cache_type, power_max = 10, sinr = 0.1, noise = 0.5):
         """ Separate init function for wireless scenario.
         
             Sets/constructs the following parameters/variables:
@@ -240,11 +240,14 @@ class CacheNetwork(DiGraph):
         self.wirelessStats = {}
         self.wirelessStats['power_by_slot'] = []
         self.wirelessStats['frac_by_slot'] = []
+        self.wirelessStats['w_by_slot'] = []
+        self.wirelessStats['sinr_by_slot'] = []
         # Additional wireless parameters
         self.T = T
         self.graphsize = V
+        self.PowerCap = [power_max] * V
         #self.PowerCap = [power_max * 3] + [power_max] * int(SC) + [0]*(V-int(SC)-1)
-        self.PowerCap = [power_max * 3] + [power_max] * (V-1)
+        #self.PowerCap = [power_max * 3] + [power_max] * (V-1)
         self.PowerFrac = {}
         self.Power_LP_A = 0.0 * np.identity(self.graphsize**2)
         self.Power_LP_b = 0.0 * np.arange(self.graphsize**2)
@@ -291,6 +294,7 @@ class CacheNetwork(DiGraph):
             if self.edge[v][u]['is_in_path'] == 1:
                 self.node[v]['out_paths'] += 1
         
+        # Initially, evenly distributed power to out-paths
         # WirelessGain is derived from edge ['gain']
         for v in self.nodes():
             self.WirelessGain[v] = {}
@@ -298,30 +302,24 @@ class CacheNetwork(DiGraph):
             for u in self.nodes():
                 self.WirelessGain[v][u] = 0.0
                 if (v,u) in self.edges() and self.edge[v][u]['is_in_path'] == 1:
-                    self.PowerFrac[v][u] = self.PowerCap[v] / self.node[v]['out_paths']
+                    self.PowerFrac[v][u] = 1.0 / self.node[v]['out_paths']
                 else:
-                    self.PowerFrac[v][u] = 0
+                    self.PowerFrac[v][u] = 0        
         
-        # Initially, evenly distributed power to out-paths
-        for v in self.nodes():
+        ''' for v in self.nodes():
             self.PowerFrac[v] = {}
             for u in self.nodes():
                 if (v,u) in self.edges() and self.edge[v][u]['is_in_path'] == 1:
                     self.PowerFrac[v][u] = 1.0 / self.node[v]['out_paths']
                 else:
-                    self.PowerFrac[v][u] = 0.0
+                    self.PowerFrac[v][u] = 0.0 '''
+                    
         for e in self.edges():
             v = e[0]
             u = e[1]
             self.edge[v][u]['power'] = self.PowerCap[v] * self.PowerFrac[v][u]
             self.edge[v][u]['gain'] = gains[e]
             self.WirelessGain[v][u] = gains[e]
-            """ if self.edge[v][u]['is_in_path'] == 1:
-                self.edge[v][u]['gain'] = 1.0
-                self.WirelessGain[v][u] = 1.0
-            else:
-                self.edge[v][u]['gain'] = 0
-                self.WirelessGain[v][u] = 0 """
 
         # Push power to each node
         self.push_power()
@@ -437,7 +435,7 @@ class CacheNetwork(DiGraph):
             #h_qp = matrix( -1.0 * np.transpose(np.hstack((self.Power_LP_b, self.b_nonnegative, self.b_powercap))))
             #h_qp = matrix( -1.0 * np.transpose(np.hstack((self.Power_LP_b, self.b_nonnegative, self.b_powercap, -1.0*self.b_powercap))))
             #h_qp = matrix( -1.0 * np.transpose(np.hstack((self.b_nonnegative, self.b_powercap))))
-            h_qp = matrix( np.transpose(np.hstack((self.Power_LP_b, self.b_nonnegative, self.b_powercap))))            
+            h_qp = matrix( np.transpose(np.hstack((self.Power_LP_b, self.b_nonnegative, self.b_powercap))))           
             
             sol_qp = qp(P_qp, Q_qp, G_qp, h_qp, options={'show_progress': False})
             Iter = sol_qp['iterations']            
@@ -460,6 +458,10 @@ class CacheNetwork(DiGraph):
                         self.PowerFrac[v][u] = 0.0
             #print("self.PowerFrac = "+str(self.PowerFrac))
             self.wirelessStats['frac_by_slot'].append(self.PowerFrac)
+            self.wirelessStats['w_by_slot'].append(w_bar)
+            sinr_by_slot = (np.matmul(self.Power_LP_A, w_bar))/(-1.0 * self.noise)
+            sinr_by_slot[np.abs(sinr_by_slot) < 1e-6] = 0
+            self.wirelessStats['sinr_by_slot'].append(sinr_by_slot)
             
             # step4: push power to caches and edges
             self.push_power()
@@ -539,6 +541,7 @@ class CacheNetwork(DiGraph):
                     self.w_gradient[v][u] = 0.0
             self.w_tilde = [0.0 for i in range(self.graphsize **2)]
             print("Time-averaged power consumption in last time slot ="+str((self.Current_Power_Consume - self.Global_Power_Consume)/self.T))
+            self.wirelessStats['power_by_slot'].append((self.Current_Power_Consume - self.Global_Power_Consume)/self.T)
             self.Global_Power_Consume = self.Current_Power_Consume
             
             # step1: collects the caching states and construct LP elements:
@@ -570,9 +573,19 @@ class CacheNetwork(DiGraph):
             sol_lp = lp(c = c_lp, G = G_lp, h = h_lp, options={'show_progress': False})
             
             # step3: update power variables
+            #for v in self.nodes():
+            #    for u in self.nodes():
+            #        self.PowerFrac[v][u] = sol_lp['x'][v*self.graphsize +u]
+            
+            epsilon = 1.e-3
             for v in self.nodes():
                 for u in self.nodes():
-                    self.PowerFrac[v][u] = sol_lp['x'][v*self.graphsize +u]
+                    if np.abs(sol_lp['x'][v * self.graphsize + u]) > epsilon:
+                        self.PowerFrac[v][u] = sol_lp['x'][v * self.graphsize + u]
+                    else:
+                        self.PowerFrac[v][u] = 0.0
+            
+            self.wirelessStats['w_by_slot'].append(sol_lp['x'])
             
             self.push_power()
             yield self.env.timeout(self.T)
@@ -1733,7 +1746,6 @@ def main():
         if args.graph_type == 'servicenetwork':
             return topologies.ServiceNetwork()
         if args.graph_type == 'hetnet':
-            print(args.hetnet_grid)
             if args.hetnet_load is not None:
                 return topologies.LoadHetNet(args.hetnet_load)
             else:

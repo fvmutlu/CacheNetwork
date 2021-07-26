@@ -1,5 +1,7 @@
-from networkx import Graph, selfloop_edges, shortest_path
+from networkx import Graph, selfloop_edges, shortest_path, draw_networkx
 import numpy as np
+import matplotlib.pyplot as plt
+import re
 import time
 import pickle
 from helpers import uniqueify
@@ -505,7 +507,7 @@ def HetNet(V, SC, R_cell, pathloss_exponent, mode):
     G.nodes["nodeMC"]['pos'] = np.array([0,0])
     if mode == 'grid':
         if np.sqrt(SC+1) == int(np.sqrt(SC+1)):
-            x, y = np.meshgrid(np.linspace(-R_cell,R_cell,int(np.sqrt(SC+1))), np.linspace(R_cell,-R_cell,int(np.sqrt(SC+1))))
+            x, y = np.meshgrid(np.linspace(-R_cell/2,R_cell/2,int(np.sqrt(SC+1))), np.linspace(R_cell/2,-R_cell/2,int(np.sqrt(SC+1))))
             pos_list = []
             for i in range(int(np.sqrt(SC+1))):
                 for j in range(int(np.sqrt(SC+1))):
@@ -514,8 +516,7 @@ def HetNet(V, SC, R_cell, pathloss_exponent, mode):
             for n in range(SC):
                 G.nodes["nodeSC"+str(n)]['pos'] = pos_list[n]
         else:
-            print("Number of small cells not equal to a square number - 1")
-            raise AssertionError()
+            raise AssertionError("Number of small cells not equal to (square integer - 1)")
         
     # Assign edge gains
     for (v,u) in G.edges():
@@ -525,14 +526,34 @@ def HetNet(V, SC, R_cell, pathloss_exponent, mode):
     
     top_file = 'topfiles/top_V' + str(V) + '_SC' + str(SC) + '_R' + str(R_cell) + '_exp' + str(pathloss_exponent)
     top_file = uniqueify(top_file, 'new')
-     
+    
+    
     with open(top_file,'wb+') as f:
         pickle.dump(G, f)
+        
+    # Drawing the topology
+    node_positions = dict((node, G.nodes[node]['pos']) for node in G.nodes())
+    node_colors = ['blue'] + ['red'] * int(SC) + ['black'] * int(V-SC-1)
+    node_sizes = [600] + [450] * int(SC) + [300] * int(V-SC-1)
+    
+    draw_networkx(G, pos = node_positions, node_color = node_colors, node_size = node_sizes)
+    plt.show()
 
     return G
 
 def LoadHetNet(top_file):
     with open(top_file, 'rb') as f:
         G = pickle.load(f)
+        
+    # Drawing the topology
+    V = len(G.nodes())
+    lx = [re.findall('nodeSC\d*', x) for x in G.nodes()]
+    SC = int(re.findall(r'\d+',max(lx)[0])[0]) + 1
+    node_positions = dict((node, G.nodes[node]['pos']) for node in G.nodes())
+    node_colors = ['blue'] + ['red'] * int(SC) + ['black'] * int(V-SC-1)
+    node_sizes = [600] + [450] * int(SC) + [300] * int(V-SC-1)
+    
+    draw_networkx(G, pos = node_positions, node_color = node_colors, node_size = node_sizes)
+    plt.show()
     
     return G

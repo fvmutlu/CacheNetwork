@@ -172,11 +172,13 @@ class CacheNetwork(DiGraph):
                  weights,
                  delays,
                  T,
+                 graph_type,
                  warmup=0,
                  monitoring_rate=1.0,
                  demand_change_rate=0,
                  demand_min=1.0,
-                 demand_max=1.0):
+                 demand_max=1.0
+                 ):
         self.env = Environment()
         self.warmup = warmup
         self.demandstats = {}
@@ -187,6 +189,7 @@ class CacheNetwork(DiGraph):
         self.demand_change_rate = demand_change_rate
         self.demand_min = demand_min
         self.demand_max = demand_max
+        self.graph_type = graph_type
         
         # parameters used for wireless
         #self.demands = demands
@@ -211,6 +214,7 @@ class CacheNetwork(DiGraph):
         DiGraph.__init__(self, G)
         for x in self.nodes():
             self.node[x]['cache'] = cacheGenerator(capacities[x], x)
+            self.node[x]['cache'].cache._is_wireline = False
             self.node[x]['pipe'] = Store(self.env)
         for e in self.edges():
             x = e[0]
@@ -240,11 +244,8 @@ class CacheNetwork(DiGraph):
                 self.node[source]['cache'].makePermanent(
                     item
                 )  ###THIS NEEDS TO BE IMPLEMENTED BY THE NETWORKED CACHE
-		
-		# initial wireless settings
-        self.initWireless(demands=demands)
         
-
+    def initProcesses(self):
         for d in self.demands:
             self.env.process(self.spawn_queries_process(d))
             self.env.process(self.demand_monitor_process(d))
@@ -262,23 +263,70 @@ class CacheNetwork(DiGraph):
         
         # start power update process
         if self.cache_type == 'LMIN':
-            self.env.process(self.power_update_process_LMIN())
+            #self.env.process(self.power_update_process_Priority_MinC())
+            self.env.process(self.power_update_process_MinL())
         else:
             self.env.process(self.power_update_process_Priority_MinC())
-
+            
+        self.env.process(self.power_consume_monitor_process())
         self.env.process(self.monitor_process())
+        
+    def power_consume_monitor_process(self):
+        self.TimeAverageCost = 0.0
+        last_monit_time = self.env.now
+        history_power_consume = 0.0
+        sum_sofar = 0.0
+        sum_id = 1
+        start_time = 100.0
+        while True:
+            now = self.env.now
+            t = now - last_monit_time
+            history_power_consume_new = 0.0
+            if t > 0.0:
+                for x in self.nodes():
+                    history_power_consume_new += self.node[x]['cache'].stats['history_power_consume']
+                last_power_consume = (history_power_consume_new - history_power_consume) / 10.0
+                #print("averaged power consume = "+str(last_power_consume))
+                history_power_consume = history_power_consume_new
+                if now >= start_time:
+                    sum_sofar += last_power_consume
+                    self.TimeAverageCost = sum_sofar / sum_id
+                    print("time:"+str(now)+", averaged cost = "+str(self.TimeAverageCost))
+                    sum_id += 1
+                else:
+                    print("time:"+str(now))
+            yield self.env.timeout(self.T)
 
-    def initWireless(self, demands, gains = {}, sinr_min = 0.1, sinr_max = 1.0, power_max = 100.0, noise = 1.0):
+    def initWireless(self, wireline_cost, gains, node_id , sinr_min , power_cap , noise):
 		
 		# identify the edges that used in a path
 		#print("Network edges: "+str(self.edges()))
+		self.wireline_cost = wireline_cost
+  		# power variable init
+		self.PowerCap = power_cap
+  
+        # Wirelessgain is derived from edge.['gain']
+		self.WirelessGain = gains
+  
+        # Mark the ids for differnt type of nodes
+		(Backhaul_id,MC_id_list,SC_id_list,User_id_list) = node_id if node_id != None else (None,None,None,None)
+		print("node_id = "+str(node_id))
+		#print("WirelessGain = "+str(self.WirelessGain))
+        
+        #modify gains according to in-edge situation
+		for v in self.nodes():
+			for u in self.nodes():
+				if (v,u) not in self.edges():
+					self.WirelessGain[v][u] = 0.0
+     
+		self.edges_in_path = 0
 		for e in self.edges():
 			v = e[0]
 			u = e[1]
 			self.edge[v][u]['is_in_path'] = 0
 
 		#print("Network paths:")
-		for d in demands:
+		for d in self.demands.keys():
 			path_d = d.path
 			#print(path_d)
 			for k in range(len(path_d)-1):
@@ -286,16 +334,42 @@ class CacheNetwork(DiGraph):
 				u = path_d[k+1]
 				self.edge[v][u]['is_in_path'] = 1
 				self.edge[u][v]['is_in_path'] = 1
+				#print("edge "+str((v,u))+" is in path")
 
-		# setup SINR sontraints for each in-path edge
-		for e in self.edges():
-			v = e[0]
-			u = e[1]
-			if self.edge[v][u]['is_in_path'] == 1:
+		# setup SINR sontraints for each in-path edge, 
+		self.sinrconst = {}
+		for v in self.nodes():
+			self.sinrconst[v] = {}
+			for u in self.nodes():
+				if (v,u) in self.edges():
+					if self.edge[v][u]['is_in_path'] == 1:
+						self.edges_in_path += 1
+						self.sinrconst[v][u] = sinr_min if (v != Backhaul_id) and (u != Backhaul_id) else 0.0
+					else:
+						self.sinrconst[v][u] = 0.0
+				else:
+					self.sinrconst[v][u] = 0.0
+		#print("edges_in_path = "+str(self.edges_in_path))
+		#print("sinrconst = "+str(self.sinrconst))
+     
+		#for e in self.edges():
+		#	v = e[0]
+		#	u = e[1]
+		#	if self.edge[v][u]['is_in_path'] == 1:
 				#self.edge[v][u]['sinrconst'] = random.uniform(sinr_min, sinr_max)
-				self.edge[v][u]['sinrconst'] = 0.05
-			else:
-				self.edge[v][u]['sinrconst'] = 0
+		#		self.edge[v][u]['sinrconst'] = sinr_min
+		#	else:
+		#		self.edge[v][u]['sinrconst'] = 0
+
+		if self.graph_type == 'hetnet': # if assume hetnet, for the backhaul, no sinr constraint and use wireline_cost
+			self.node[Backhaul_id]['cache'].cache._is_wireline = True
+			self.node[Backhaul_id]['cache'].cache._wireline_cost = wireline_cost
+		#	for e in self.edges():
+		#		v = e[0]
+		#		u = e[1]
+		#		if u == Backhaul_id or v == Backhaul_id:
+		#			self.edge[v][u]['sinrconst'] = 0.0
+					#print("sinrconst = 0 for edge "+str(e))
 
 		# count out-going in-path edges
 		for v in self.nodes():
@@ -308,21 +382,12 @@ class CacheNetwork(DiGraph):
 		#for v in self.nodes():
 			#print(self.node[v]['out_paths'])
 
-		# power variable init
-		self.PowerCap = [0.6 for n in self.nodes()]
-  
-        # Wirelessgain is derived from edge.['gain']
-		for v in self.nodes():
-			self.WirelessGain[v] = {}
-			for u in self.nodes():
-				self.WirelessGain[v][u] = 0.0
-
         # initially, evenly distributed power to out-paths
 		for v in self.nodes():
 			self.PowerFrac[v] = {}
 			for u in self.nodes():
 				if (v,u) in self.edges() and self.edge[v][u]['is_in_path'] == 1:
-					self.PowerFrac[v][u] = self.PowerCap[v] / self.node[v]['out_paths']
+					self.PowerFrac[v][u] = 0.0 / self.node[v]['out_paths']
 				else:
 					self.PowerFrac[v][u] = 0
 		for e in self.edges():
@@ -330,45 +395,54 @@ class CacheNetwork(DiGraph):
 			u = e[1]
 			self.edge[v][u]['power'] = self.PowerCap[v] * self.PowerFrac[v][u]
 			#self.edge[v][u]['gain'] = gains[e]
-			self.WirelessGain[v][u] = 1.0
-   
+			#self.WirelessGain[v][u] = gains[e]
+			#self.WirelessGain[v][u] = 1.0
+		#print("gains="+str(gains))
         # push power to each node
 		self.push_power()
 
 		# noise init
-		self.noise = noise
+		average_powercap = np.mean(np.array(power_cap))
+		gain_values = [gains[v][u] for u in gains[v].keys() for v in gains.keys()]
+		average_gain = np.mean(np.array(gain_values))
+		#print("gain_values="+str(gain_values))
+		self.noise = noise #* average_gain #* average_powercap / 10.0
+		print("self.noise="+str(self.noise))
+
 
 		# LP parameter init
 		# Note: LP problem is formulated as 'AW <= b'
-		self.Power_LP_A = 0.0* np.identity(self.graphsize**2)
-		self.Power_LP_b = 0.0* np.arange(self.graphsize**2)
+		self.Power_LP_A = np.zeros((self.edges_in_path,self.graphsize**2))
+		self.Power_LP_b = np.zeros(self.edges_in_path)
 		edge_id = 0
 		for v in self.nodes():
 			for u in self.nodes():
-				if (v,u) in self.edges():
-					#print("LP: Edge "+str((v,u))+"setting")
+				if (v,u) in self.edges() and self.edge[v][u]['is_in_path'] == 1:
+					#print("SINR constraint: Edge No."+str(edge_id)+":"+str((v,u))+"setting")
 					# b = gammavu*Nu
-					self.Power_LP_b[edge_id] = -1.0* self.edge[v][u]['sinrconst'] * self.noise
+					self.Power_LP_b[edge_id] = -1.0* self.sinrconst[v][u] * self.noise
+					#print("SINR lb = "+str(self.edge[v][u]['sinrconst'])+" Power_LP_b[edge_id]="+str(self.Power_LP_b[edge_id]))
 					# Matrix A:
 					# term 1: Gvu * s_bar(v) wvu
-					self.Power_LP_A[edge_id][v*self.graphsize+u] += -1.0 * self.WirelessGain[v][u] * self.PowerCap[v]
+					self.Power_LP_A[edge_id][v*self.graphsize+u] = -1.0 * self.WirelessGain[v][u] * self.PowerCap[v]
+					#print("WirelessGain[v][u] = "+str(self.WirelessGain[v][u]) + " PowerCap[v] = "+str(self.PowerCap[v]))
 					# term 2: gammavu*Gvu*s_bar(v)*sum_up neq u: wvup
 					for up in self.nodes():
 						if u!=up:
-							self.Power_LP_A[edge_id][v*self.graphsize+up] += 1.0* self.edge[v][u]['sinrconst'] * self.WirelessGain[v][u] * self.PowerCap[v]
+							self.Power_LP_A[edge_id][v*self.graphsize+up] = 1.0* self.sinrconst[v][u] * self.WirelessGain[v][u] * self.PowerCap[v]
 					# term 3: gammavu*sum_vp neq v: Gvpu S_bar(vp) * sum_up: wvpup
 					for vp in self.nodes():
 						if vp != v:
 							for up in self.nodes():
 								#print("vp = "+str(vp)+", up = "+str(up)+" -> "+str(WirelessGain[v][u]))
-								self.Power_LP_A[edge_id][vp*self.graphsize+up] = 1.0* self.edge[v][u]['sinrconst'] * self.WirelessGain[vp][u] * self.PowerCap[vp]
+								self.Power_LP_A[edge_id][vp*self.graphsize+up] = 1.0* self.sinrconst[v][u] * self.WirelessGain[vp][u] * self.PowerCap[vp]
 					edge_id += 1
 		self.A_nonnegative = -1.0* np.identity(self.graphsize **2)
 		self.b_nonnegative = np.zeros(self.graphsize **2)
 		self.A_powercap = np.kron(np.eye(self.graphsize) , np.ones((1,self.graphsize)))
 		self.b_powercap = np.ones(self.graphsize)
-		#print(self.Power_LP_A)
-		#print(self.Power_LP_b)
+		#print("Power_LP_A = "+str(self.Power_LP_A))
+		#print("Power_LP_b = "+str(self.Power_LP_b))
 		print("Power initialized at time "+str(self.env.now))
   
     def push_power(self):
@@ -390,15 +464,15 @@ class CacheNetwork(DiGraph):
             
             #print("Power global-updating at time "+str(self.env.now))
             # step0: collect power consumption and reset
-            self.Current_Power_Consume = 0.0
+            #self.Current_Power_Consume = 0.0
             for v in self.nodes():
-                self.Current_Power_Consume += self.node[v]['cache'].stats['history_power_consume']
+                #self.Current_Power_Consume += self.node[v]['cache'].stats['history_power_consume']
                 self.w_gradient[v] = {}
                 for u in self.nodes():
                     self.w_gradient[v][u] = 0.0
             self.w_tilde = [0.0 for i in range(self.graphsize **2)]
-            print("Time-averaged power consumption in last time slot ="+str((self.Current_Power_Consume - self.Global_Power_Consume)/self.T))
-            self.Global_Power_Consume = self.Current_Power_Consume
+            #print("Time-averaged power consumption in last time slot ="+str((self.Current_Power_Consume - self.Global_Power_Consume)/self.T))
+            #self.Global_Power_Consume = self.Current_Power_Consume
             
             # step1: pull n-scores from each node and compute estimated subgradient from 
             for v in self.nodes():
@@ -436,7 +510,7 @@ class CacheNetwork(DiGraph):
                 yield self.env.timeout(self.T)
                 continue
             
-            epsilon = 1.e-3
+            epsilon = 1.e-6
             for v in self.nodes():
                 for u in self.nodes():
                     if np.abs(w_bar[v * self.graphsize + u]) > epsilon:
@@ -450,78 +524,19 @@ class CacheNetwork(DiGraph):
             #print("...done")
             yield self.env.timeout(self.T)
 
-    def power_update_process_Priority_MinL(self):
+    def power_update_process_MinL(self):
         # Centralized power updating for other cache types
         while(True):
             # step0: collect power consumption and reset
-            self.Current_Power_Consume = 0.0
+            #self.Current_Power_Consume = 0.0
             for v in self.nodes():
-                self.Current_Power_Consume += self.node[v]['cache'].stats['history_power_consume']
+                #self.Current_Power_Consume += self.node[v]['cache'].stats['history_power_consume']
                 self.w_gradient[v] = {}
                 for u in self.nodes():
                     self.w_gradient[v][u] = 0.0
             self.w_tilde = [0.0 for i in range(self.graphsize **2)]
-            print("Time-averaged power consumption in last time slot ="+str((self.Current_Power_Consume - self.Global_Power_Consume)/self.T))
-            self.Global_Power_Consume = self.Current_Power_Consume
-            
-            # step1: collects the caching states and construct LP elements:
-            # max sum_f lamb_f sum_k=1^(p-1) t_{i,p,k}
-            # s.t. t_{i.p.k} <= 1; t_{i.p.k} <= 1 - w_{p_k+1 p_k} + sum_l=1^k x_{p_l i}; SINR; Powercap
-            size_t = 0
-            for d in self.demands:
-                size_t += len(d.path)-1
-            t_const_1 = np.ones(size_t) # row vector for t <= 1
-            t_const_2 = np.zeros(size_t) # row vector for t <= 1-w+sum...
-            t_pos = 0
-            c_lp = np.zeros(size_t + self.graphsize**2)
-            for d in self.demands:
-                for k in [1+i for i in range(len(d.path)-1)]:
-                    c_lp[t_pos] = -1.0 * d.rate
-                    sum_cache = 0.0
-                    for l in range(k):
-                        sum_cache += d.item in self.node[d.path[l]]['cache'].cache
-                    t_const_2[t_pos] = 1 - self.PowerFrac[d.path[k]][d.path[k-1]]
-                    t_pos += 1
-            #print("size_t = "+str(size_t)+", t_pos = "+str(t_pos))
-            
-            # step2: solve LP: min cTx , s.t. Gx <= h
-            c_lp = matrix(np.transpose(c_lp))
-            G1 = np.hstack((np.identity(size_t), np.zeros((size_t,self.graphsize**2))))
-            G2 = G1
-            G_W = -1.0 * np.vstack((self.Power_LP_A, self.A_nonnegative, self.A_powercap))
-            rows,cols = np.shape(G_W)
-            G3 = np.hstack(( np.zeros(( rows, size_t)),  G_W ))
-            G_lp = matrix(np.vstack((G1,G2,G3)))
-            
-            h_W = -1.0 * np.hstack((self.Power_LP_b, self.b_nonnegative, self.b_powercap))
-            h_lp = matrix(np.transpose(np.hstack((t_const_1,t_const_2,h_W))))
-            #print("c_lp = "+str(c_lp))
-            #print("G_lp = "+str(G_lp))
-            #print("h_lp = "+str(h_lp))
-            
-            sol_lp = lp(c = c_lp, G = G_lp, h = h_lp, options={'show_progress': False})
-            
-            # step3: update power variables
-            for v in self.nodes():
-                for u in self.nodes():
-                    self.PowerFrac[v][u] = sol_lp['x'][size_t + v*self.graphsize +u]
-            
-            self.push_power()
-            yield self.env.timeout(self.T)
-    
-    def power_update_process_Priority_MinC(self):
-        # Centralized power updating for other cache types
-        while(True):
-            # step0: collect power consumption and reset
-            self.Current_Power_Consume = 0.0
-            for v in self.nodes():
-                self.Current_Power_Consume += self.node[v]['cache'].stats['history_power_consume']
-                self.w_gradient[v] = {}
-                for u in self.nodes():
-                    self.w_gradient[v][u] = 0.0
-            self.w_tilde = [0.0 for i in range(self.graphsize **2)]
-            print("Time-averaged power consumption in last time slot ="+str((self.Current_Power_Consume - self.Global_Power_Consume)/self.T))
-            self.Global_Power_Consume = self.Current_Power_Consume
+            #print("Time-averaged power consumption in last time slot ="+str((self.Current_Power_Consume - self.Global_Power_Consume)/self.T))
+            #self.Global_Power_Consume = self.Current_Power_Consume
             
             # step1: collects the caching states and construct LP elements:
             # min sum_(i,p) lambda_(i,p) sum_k s_bar_p_k+1 w_{p_k+1 p_k} prod_l (1 - x_{p_l i})
@@ -545,6 +560,58 @@ class CacheNetwork(DiGraph):
             h_lp = matrix( np.transpose(np.hstack((self.Power_LP_b, self.b_nonnegative, self.b_powercap))))
             
             c_lp = matrix(np.transpose(c_minC))
+            #c_lp = matrix(np.transpose(np.ones(w_len)))
+            #print("c_lp = "+str(c_lp))
+            #print("G_lp = "+str(G_lp))
+            #print("h_lp = "+str(h_lp))
+            
+            sol_lp = lp(c = c_lp, G = G_lp, h = h_lp, options={'show_progress': False})
+            
+            # step3: update power variables
+            for v in self.nodes():
+                for u in self.nodes():
+                    self.PowerFrac[v][u] = sol_lp['x'][v*self.graphsize +u]
+            
+            self.push_power()
+            yield self.env.timeout(self.T)
+    
+    def power_update_process_Priority_MinC(self):
+        # Centralized power updating for other cache types
+        while(True):
+            # step0: collect power consumption and reset
+            #self.Current_Power_Consume = 0.0
+            for v in self.nodes():
+                #self.Current_Power_Consume += self.node[v]['cache'].stats['history_power_consume']
+                self.w_gradient[v] = {}
+                for u in self.nodes():
+                    self.w_gradient[v][u] = 0.0
+            self.w_tilde = [0.0 for i in range(self.graphsize **2)]
+            #print("Time-averaged power consumption in last time slot ="+str((self.Current_Power_Consume - self.Global_Power_Consume)/self.T))
+            #self.Global_Power_Consume = self.Current_Power_Consume
+            
+            # step1: collects the caching states and construct LP elements:
+            # min sum_(i,p) lambda_(i,p) sum_k s_bar_p_k+1 w_{p_k+1 p_k} prod_l (1 - x_{p_l i})
+            # s.t. w >= 0, sum w <= 1, SINR
+            w_len = self.graphsize **2
+            c_minC = np.zeros(w_len)
+            for d in self.demands.keys():
+                rate = d.rate
+                path = d.path
+                item = d.item
+                for k in range(1,len(path)-1):
+                    cache_product = 1.0
+                    for l in range(1,k):
+                        cache_product = cache_product * (1.0 - item in self.node[path[l-1]]['cache'].cache)
+                    v = path[k]
+                    u = path[k-1]
+                    c_minC[ v * self.graphsize + u] += rate * self.PowerCap[v] * cache_product
+            
+            # step2: solve LP: min cTx , s.t. Gx <= h
+            G_lp = matrix( np.vstack((self.Power_LP_A, self.A_nonnegative, self.A_powercap)))
+            h_lp = matrix( np.transpose(np.hstack((self.Power_LP_b, self.b_nonnegative, self.b_powercap))))
+            
+            c_lp = matrix(np.transpose(c_minC))
+            c_lp = matrix(np.transpose(np.ones(w_len)))
             #print("c_lp = "+str(c_lp))
             #print("G_lp = "+str(G_lp))
             #print("h_lp = "+str(h_lp))
@@ -684,9 +751,10 @@ class CacheNetwork(DiGraph):
             logging.debug(pp([self.env.now, ':', 'Pipe at', e, 'pushing',
                               msg]))
             time_before = self.env.now
-            yield self.env.timeout(
-                msg.length *
-                random.expovariate(1 / self.edge[e[0]][e[1]]['delay']))
+            if msg.length == 0 or self.edge[e[0]][e[1]]['delay'] == 0:
+                yield self.env.timeout(0.0)
+            else:
+                yield self.env.timeout(msg.length *random.expovariate(1 / self.edge[e[0]][e[1]]['delay']))
             delay = self.env.now - time_before
             msg.stats['delay'] += delay
             msg.stats['hops'] += 1.0
@@ -695,10 +763,10 @@ class CacheNetwork(DiGraph):
             if not msg.u_bit:
                 
                 # For wireline case, aggregates the link weights as the downweight
-                #msg.stats['downweight'] += self.edge[e[0]][e[1]]['weight'] + self.edge[e[1]][e[0]]['weight']
+                msg.stats['downweight'] += self.edge[e[0]][e[1]]['weight'] + self.edge[e[1]][e[0]]['weight']
             
                 # For wireless case, aggregates the transmitting powers as the downweight
-                msg.stats['downweight'] += self.edge[e[0]][e[1]]['power']
+                #msg.stats['downweight'] += self.edge[e[0]][e[1]]['power']
                 #print("self.edge[e[0]][e[1]]['power'] = "+str(self.edge[e[0]][e[1]]['power']))
                 
                 #print("Time:"+str(self.env.now)+"msg "+str(msg.header)+" passing through edge "+str(e)+", power: "+str(self.edge[e[0]][e[1]]['power']))
@@ -1177,7 +1245,10 @@ class PriorityNetworkCache(NetworkedCache):
                         ]))
                     
                     # for the case that  node has item in its cache, send respond msg
-                    self.stats['history_power_consume'] += self.cache._powercap * self.cache._w[pred]
+                    if self.cache._is_wireline:
+                        self.stats['history_power_consume'] += self.cache._wireline_cost
+                    else:
+                        self.stats['history_power_consume'] += self.cache._powercap * self.cache._w[pred]
                     
                 e = (self._id, pred)
                 rmsg = ResponseMessage(d, query_id, stats=msg.stats)
@@ -1197,8 +1268,8 @@ class PriorityNetworkCache(NetworkedCache):
                         ]))
                     return []
                 
-                # query continue propagates
-                self.stats['history_power_consume'] += self.cache._powercap * self.cache._w[succ]
+                # query continue propagates, power consumption negligble
+                self.stats['history_power_consume'] += 0.0 #self.cache._powercap * self.cache._w[succ]
                     
                 e = (self._id, succ)
                 return [(msg, e)]
@@ -1246,7 +1317,10 @@ class PriorityNetworkCache(NetworkedCache):
                     ]))
                 pred = d.pred(self._id)
                  # respond continue propagates
-                self.stats['history_power_consume'] += self.cache._powercap * self.cache._w[pred]
+                if self.cache._is_wireline:
+                    self.stats['history_power_consume'] += self.cache._wireline_cost
+                else:
+                    self.stats['history_power_consume'] += self.cache._powercap * self.cache._w[pred]
             e = (self._id, pred)
             return [(msg, e)]
 
@@ -1613,7 +1687,10 @@ class LMinCache(NetworkedCache):
                             ' generated by cache', self._id
                         ]))
                     # for the case that a hit cache for non-requesting node, consumes power
-                    self.stats['history_power_consume'] += self.cache._powercap * self.cache._w[pred]
+                    if self.cache._is_wireline:
+                        self.stats['history_power_consume'] += self.cache._wireline_cost
+                    else:
+                        self.stats['history_power_consume'] += 0#self.cache._powercap * self.cache._w[pred]
                     if self._id == 1:
                         #print("self.stats['history_power_consume'] +="+str(self.cache._powercap * self.cache._w[pred]))
                         pass
@@ -1674,7 +1751,10 @@ class LMinCache(NetworkedCache):
                     ]))
                 pred = d.pred(self._id)
                 # for case that a content need further delivery, power consumed
-                self.stats['history_power_consume'] += self.cache._powercap * self.cache._w[pred]
+                if self.cache._is_wireline:
+                    self.stats['history_power_consume'] += self.cache._wireline_cost
+                else:
+                    self.stats['history_power_consume'] += self.cache._powercap * self.cache._w[pred]
                 if self._id == 1:
                     #print("self.stats['history_power_consume'] +="+str(self.cache._powercap * self.cache._w[pred]))
                     pass
@@ -1729,7 +1809,7 @@ class LMinCache(NetworkedCache):
                                                query_id,
                                                msg.explore_source,
                                                stats=msg.stats)
-                ermsg.payload = 0.0
+                ermsg.payload = self.cache._powercap * self.cache._w[pred]
                 return [(ermsg, e)]
             else:
                 logging.debug(pp([now, ': Item', item, 'is has agreggate',
@@ -1811,13 +1891,19 @@ class LMinCache(NetworkedCache):
 			# case of wireless, aggregate power caps:
             logging.debug(pp([now, ': Node', self._id, 'updating derivative of item',
                           item, 'with measurement', msg.payload]))
+            #print("payload="+str(msg.payload))
             self.cache.updateGradient(item, msg.payload)
 			# step1 done
-
+   
+            pred = d.pred(self._id)
+            e = (self._id, pred)
 			# step2: if B = 1, add payload, otherwise dont
-            if self.cache.getB(d) == 1:
-                #n_curt = e[1]
-                msg.payload += self.cache._powercap #PowerCap[n_curt]
+            #if pred != None:
+                #msg.payload += self.cache._powercap * self.cache._w[pred] #PowerCap[n_curt]
+            #if self.cache.getB(d) == 1:
+                #msg.payload += self.cache._powercap*self.cache_w[pred] #PowerCap[n_curt]
+            if pred != None:
+                msg.payload += self.cache._powercap*self.cache._w[pred]
             # step2 done
 
             if msg.explore_source == self._id:
@@ -1836,8 +1922,7 @@ class LMinCache(NetworkedCache):
                     'passes through cache', self._id,
                     'moving further down path'
                 ]))
-            pred = d.pred(self._id)
-            e = (self._id, pred)
+            
             return [(msg, e)]
         
 
@@ -1846,7 +1931,7 @@ class LMinCache(NetworkedCache):
 
 	   It is effectively a wrapper for a receive call, made to a NetworkedCache object. 
 
-	"""
+	    """
         while True:
             logging.debug(
                 pp([self.env.now, ': New suffling of cache', self._id]))
@@ -1951,12 +2036,70 @@ def main():
                             'expander', 'hypercube', 'star', 'barabasi_albert',
                             'watts_strogatz', 'regular', 'powerlaw_tree',
                             'small_world', 'geant', 'abilene', 'dtelekom',
-                            'servicenetwork'
+                            'servicenetwork','hetnet'
                         ])
     parser.add_argument('--graph_size',
                         default=100,
                         type=int,
                         help='Network size')
+    parser.add_argument('--hetnet_type',
+                        default='grid',
+                        type=str,
+                        help='Type of Base station distribution if assume hetnet',
+                        choices=['grid','random'])
+    parser.add_argument('--hetnet_outputfile', 
+                        default = 'hetnet_out',
+                        type=str,
+                        help='Output file for hetnet')
+    parser.add_argument('--N_SC',
+                        default=8,
+                        type=int,
+                        help='Number of Small cells if assume hetnet')
+    parser.add_argument('--N_user',
+                        default=5,
+                        type=int,
+                        help='Number of users if assume hetnet')
+    parser.add_argument('--wireline_cost',
+                        default=0.0,
+                        type=float,
+                        help='Fixed Cost of wireline links if assume hetnet, e.g. between MC and backhaul')
+    parser.add_argument('--path_loss_exponent',
+                        default=3.5,
+                        type=float,
+                        help='Path loss exponent for wireless channels')
+    parser.add_argument('--noise_power',
+                        default=1.0,
+                        type=float,
+                        help='Universal receive noise power if assume hetnet')
+    parser.add_argument('--sinr_min',
+                        default=0.05,
+                        type=float,
+                        help='Univseral minimum acceptable SINR if assume hetnet')
+    parser.add_argument('--PowerCap_MC',
+                        default=10.0,
+                        type=float,
+                        help='Peak power of MC if assume hetnet')
+    parser.add_argument('--PowerCap_SC',
+                        default=5.0,
+                        type=float,
+                        help='Peak power of SCs if assume hetnet')
+    parser.add_argument('--PowerCap_User',
+                        default=1.0,
+                        type=float,
+                        help='Peak power of users if assume hetnet')
+    parser.add_argument('--CacheCap_MC',
+                        default=5,
+                        type=int,
+                        help='Cache capacity of MC if assume hetnet')
+    parser.add_argument('--CacheCap_SC',
+                        default=3,
+                        type=int,
+                        help='Cache capacity of SCs if assume hetnet')
+    parser.add_argument('--CacheCap_User',
+                        default=1,
+                        type=int,
+                        help='Cache capacity of users if assume hetnet')
+    
     parser.add_argument(
         '--graph_degree',
         default=4,
@@ -2070,6 +2213,8 @@ def main():
             return topologies.Abilene()
         if args.graph_type == 'servicenetwork':
             return topologies.ServiceNetwork()
+        if args.graph_type == 'hetnet':
+            return topologies.HetNet(args.hetnet_type,args.N_SC,args.N_user,args.path_loss_exponent,args.random_seed)
 
     def cacheGenerator(capacity, _id):
         if args.cache_type == 'LRU':
@@ -2100,7 +2245,10 @@ def main():
     construct_stats = {}
 
     logging.info('Generating graph and weights...')
-    temp_graph = graphGenerator()
+    if args.graph_type == 'hetnet':
+        temp_graph,WirelessGain_temp = graphGenerator()
+    else:
+        temp_graph = graphGenerator()
     #networkx.draw(temp_graph)
     #plt.draw()
     logging.debug('nodes: ' + str(temp_graph.nodes()))
@@ -2108,16 +2256,47 @@ def main():
     G = DiGraph()
 
     number_map = dict(zip(temp_graph.nodes(), range(len(temp_graph.nodes()))))
+    #print("number_map="+str(number_map))
     G.add_nodes_from(number_map.values())
+    graph_size = G.number_of_nodes()
     weights = {}
+    if args.graph_type == 'hetnet':
+        Backhaul_id = number_map["Backhaul"]
+        MC_id_list = []
+        SC_id_list = []
+        User_id_list = []
+        for n_name in number_map.keys():
+            if n_name.startswith('MC'):
+                MC_id_list.append(number_map[n_name])
+            elif n_name.startswith('SC'):
+                SC_id_list.append(number_map[n_name])
+            elif n_name.startswith('User'):
+                User_id_list.append(number_map[n_name])
+        WirelessGain = {}
+        for v in number_map.keys():
+            WirelessGain[number_map[v]] = {}
+            for u in number_map.keys():
+                WirelessGain[number_map[v]][number_map[u]] = WirelessGain_temp[v][u]
     for (x, y) in temp_graph.edges():
         xx = number_map[x]
         yy = number_map[y]
         G.add_edges_from(((xx, yy), (yy, xx)))
-        weights[(xx, yy)] = random.uniform(args.min_weight, args.max_weight)
+        if args.graph_type == 'hetnet':
+            if xx == Backhaul_id or yy == Backhaul_id:
+                weights[(xx, yy)] = args.wireline_cost # no weight for MC-backhual
+            else:
+                weights[(xx, yy)] = 1.0 / WirelessGain[xx][yy]
+            #gains_edge[(xx, yy)] = WirelessGain[xx][yy]
+            #gains_edge[(yy, xx)] = gains_edge[(xx, yy)]
+        else:
+            weights[(xx, yy)] = random.uniform(args.min_weight, args.max_weight)
         weights[(yy, xx)] = weights[(xx, yy)]
-    graph_size = G.number_of_nodes()
+        G.edge[xx][yy]['weight'] = weights[(xx, yy)]
+        G.edge[yy][xx]['weight'] = weights[(yy, xx)]
     edge_size = G.number_of_edges()
+    if args.graph_type == 'hetnet':
+        N_SC = len(SC_id_list)
+
     logging.info('...done. Created graph with %d nodes and %d edges' %
                  (graph_size, edge_size))
     logging.debug('G is:' + str(G.nodes()) + str(G.edges()))
@@ -2125,9 +2304,10 @@ def main():
     construct_stats['edge_size'] = edge_size
 
     logging.info('Generating item sources...')
-    item_sources = dict((item, [G.nodes()[source]]) for item, source in zip(
-        range(args.catalog_size),
-        np.random.choice(range(graph_size), args.catalog_size)))
+    if args.graph_type == 'hetnet': # if hetnet, node 0 is the backhaul node
+        item_sources = dict((item, [G.nodes()[source]]) for item, source in zip(range(args.catalog_size),np.random.choice([Backhaul_id], args.catalog_size)))
+    else:
+        item_sources = dict((item, [G.nodes()[source]]) for item, source in zip(range(args.catalog_size),np.random.choice(range(graph_size), args.catalog_size)))
     logging.info('...done. Generated %d sources' % len(item_sources))
     logging.debug('Generated sources:')
     for item in item_sources:
@@ -2136,13 +2316,16 @@ def main():
     construct_stats['sources'] = len(item_sources)
 
     logging.info('Generating query node list...')
-    query_node_list = [
-        G.nodes()[i]
-        for i in random.sample(xrange(graph_size), args.query_nodes)
-    ]
+    if args.graph_type == 'hetnet': # if hetnet, only user makes requests, while the first N_SC + 2 nodes dont
+        query_nodes = args.N_user if args.N_user < args.query_nodes else args.query_nodes
+        query_node_list = [G.nodes()[i] for i in random.sample(User_id_list, query_nodes)]
+    else:
+        query_nodes = args.query_nodes
+        query_node_list = [G.nodes()[i] for i in random.sample(xrange(graph_size), args.query_nodes)]
     logging.info('...done. Generated %d query nodes.' % len(query_node_list))
 
     construct_stats['query_nodes'] = len(query_node_list)
+    #print("User_id_list = "+str(User_id_list))
 
     logging.info('Generating demands...')
     if args.demand_distribution == 'powerlaw':
@@ -2161,8 +2344,8 @@ def main():
 
     random.shuffle(items_requested)
 
-    demands_per_query_node = args.demand_size // args.query_nodes
-    remainder = args.demand_size % args.query_nodes
+    demands_per_query_node = args.demand_size // query_nodes
+    remainder = args.demand_size % query_nodes
     demands = []
     for x in query_node_list:
         dem = demands_per_query_node
@@ -2188,10 +2371,23 @@ def main():
     #plt.show()
 
     construct_stats['demands'] = len(demands)
+    #print("demands="+str(demands))
+    #print("MC_id="+str(MC_id))
 
     logging.info('Generating capacities...')
-    capacities = dict((x, random.randint(args.min_capacity, args.max_capacity))
-                      for x in G.nodes())
+    if args.graph_type == 'hetnet':
+        capacities = {}
+        for n_id in range(graph_size):
+            if n_id == Backhaul_id: 
+                capacities[n_id] = 0 # Backhaul node don't have cache
+            elif n_id in MC_id_list:
+                capacities[n_id] = args.CacheCap_MC
+            elif n_id in SC_id_list:
+                capacities[n_id] = args.CacheCap_SC
+            else:
+                capacities[n_id] = args.CacheCap_User
+    else:
+        capacities = dict((x, random.randint(args.min_capacity, args.max_capacity))for x in G.nodes())
     logging.info('...done. Generated %d caches' % len(capacities))
     logging.debug('Generated capacities:')
     for key in capacities:
@@ -2199,21 +2395,40 @@ def main():
 
     logging.info('Building CacheNetwork')
     cnx = CacheNetwork(G, args.cache_type ,cacheGenerator, demands, item_sources, capacities,
-                       weights, weights, args.T, args.warmup, args.monitoring_rate,
+                       weights, weights, args.T, args.graph_type, args.warmup, args.monitoring_rate,
                        args.demand_change_rate, args.min_rate, args.max_rate)
+    
+    # initial wireless settings
+    if args.graph_type == 'hetnet':
+        power_cap = np.zeros(graph_size)
+        for n_id in range(graph_size):
+            if n_id == Backhaul_id:
+                power_cap[n_id] = 0.0
+            elif n_id in MC_id_list:
+                power_cap[n_id] = args.PowerCap_MC
+            elif n_id in SC_id_list:
+                power_cap[n_id] = args.PowerCap_SC
+            else:
+                power_cap[n_id] = args.PowerCap_User
+        #print("power_cap="+str(power_cap))
+        cnx.initWireless(wireline_cost=args.wireline_cost,gains=WirelessGain, node_id=(Backhaul_id,MC_id_list,SC_id_list,User_id_list) if args.graph_type=="hetnet" else None
+                         ,sinr_min=args.sinr_min, power_cap=power_cap, noise=args.noise_power)
+        cnx.initProcesses()
+    else:
+        cnx.initProcesses()
     logging.info('...done')
 
-    Y, res = cnx.minimizeRelaxation()
+    #Y, res = cnx.minimizeRelaxation()
+    Y, res = (None,None)
 
-    logging.info('Optimal Relaxation is: ' + str(cnx.relaxation(Y)))
-    logging.info('Expected caching gain at relaxation point is: ' +
-                 str(cnx.expected_caching_gain(Y)))
+    #logging.info('Optimal Relaxation is: ' + str(cnx.relaxation(Y)))
+    #logging.info('Expected caching gain at relaxation point is: ' + str(cnx.expected_caching_gain(Y)))
 
     optimal_stats = {}
-    optimal_stats['res'] = res
-    optimal_stats['Y'] = Y
-    optimal_stats['L'] = cnx.relaxation(Y)
-    optimal_stats['F'] = cnx.expected_caching_gain(Y)
+    #optimal_stats['res'] = res
+    #optimal_stats['Y'] = Y
+    #optimal_stats['L'] = cnx.relaxation(Y)
+    #optimal_stats['F'] = cnx.expected_caching_gain(Y)
 
     if args.cache_type == "LMIN":
         for x in cnx.nodes():
@@ -2257,17 +2472,22 @@ def main():
     network_stats['demand'] = cnx.demandstats
     network_stats['fun'] = cnx.funstats
     network_stats['opt'] = cnx.optstats
+    
+    if args.graph_type == 'hetnet':
+        out = args.hetnet_outputfile + str(N_SC)+"SC_"+str(args.N_user)+"User_"+str(args.catalog_size)+"items_"+str(args.demand_size)+"demands_"+str(args.sinr_min)
+        with open(out, 'a+') as f:
+            f.write(str(cnx.TimeAverageCost)+"\n")
+    else:
+        out = args.outputfile + "%s_%s_%ditems_%dnodes_%dquerynodes_%ddemands_%ftime_%fchange_%fgamma_%fexpon%fbeta" % (
+            args.graph_type, args.cache_type, args.catalog_size, args.graph_size,
+            args.query_nodes, args.demand_size, args.time, args.demand_change_rate,
+            args.gamma, args.expon, args.beta)
 
-    out = args.outputfile + "%s_%s_%ditems_%dnodes_%dquerynodes_%ddemands_%ftime_%fchange_%fgamma_%fexpon%fbeta" % (
-        args.graph_type, args.cache_type, args.catalog_size, args.graph_size,
-        args.query_nodes, args.demand_size, args.time, args.demand_change_rate,
-        args.gamma, args.expon, args.beta)
-
-    with open(out, 'wb') as f:
-        pickle.dump([
-            args, construct_stats, optimal_stats, demand_stats, node_stats,
-            network_stats
-        ], f)
+        with open(out, 'wb') as f:
+            pickle.dump([
+                args, construct_stats, optimal_stats, demand_stats, node_stats,
+                network_stats
+            ], f)
 
 
 #   for d in cnx.demands:

@@ -1,6 +1,8 @@
 python2 CacheNetwork.py outputfile --graph_type abilene --debug_level ERROR --cache_type LMIN --min_capacity 3 --max_capacity 3 --query_nodes 3 --catalog_size 30 --demand_size 40 --max_weight 100 --time 25 --T 10
 python2 CacheNetwork.py outputfile --graph_type abilene --debug_level ERROR --cache_type LRU --min_capacity 3 --max_capacity 3 --query_nodes 3 --catalog_size 30 --demand_size 40 --max_weight 100 --time 25 --T 10
 python2 CacheNetwork.py outputfile --graph_type geant --debug_level ERROR --cache_type LMIN --min_capacity 3 --max_capacity 3 --query_nodes 10 --catalog_size 50 --demand_size 100 --max_weight 100 --time 500 --T 10
+python2 CacheNetwork.py outputfile --graph_type hetnet --hetnet_type grid --debug_level ERROR --catalog_size 10 --demand_size 20 --time 100 --T 10 --CacheCap_MC 3 --CacheCap_SC 3 --CacheCap_User 1 --PowerCap_MC 10 --PowerCap_SC 3 --PowerCap_User 1 --cache_type LMIN --sinr_min 0.03 --N_SC 8 --N_user 20 --query_nodes 5 --random_seed 123456789
+
 
 alpha = 0.05
 T=500, Cost=31.569

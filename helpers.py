@@ -5,39 +5,24 @@ from scipy.stats import rv_discrete
 
 def projectToSimplex(d,cap):
     keys, vals = zip( *[ (key,d[key]) for key in d] )
-        
+
+    #print "Projecting:",d
+
     n = len(vals)
-        
     q = -matrix(vals)
     P = matrix(np.eye(n))
 
-    G = matrix(np.concatenate( (np.eye(n), -np.eye(n), np.ones((1,n))) ))
+    G = matrix(np.concatenate( (np.eye(n), -np.eye(n), np.ones((1,n)) ) ))
     
-    h = matrix( n*[1.0] + n*[0.0] +[cap] )   
+    h = matrix( n*[1.0] + n*[0.0] +[cap]  )   
      
     solvers.options['show_progress'] = False
     res = solvers.qp(P,q,G,h)
+
+
+   
     sol = res['x']
     return dict(zip(keys,sol)), res
-
-
-def projectToSimplex_list(vals,cap):
-        
-    n = len(vals)
-    if n == 1:
-        return [cap], 0.0
-        
-    q = -matrix(vals)
-    P = matrix(np.eye(n))
-
-    G = matrix(np.concatenate( (np.eye(n), -np.eye(n), np.ones((1,n)), -1.0*np.ones((1,n)) ) ))
-    
-    h = matrix( n*[1.0] + n*[0.0] +[cap] + [-1.0*cap])   
-     
-    solvers.options['show_progress'] = False
-    res = solvers.qp(P,q,G,h)
-    sol = res['x']
-    return sol, res
 
 def constructDistribution(d,cap):
     epsilon = 1.e-8

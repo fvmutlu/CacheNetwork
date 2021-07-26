@@ -230,25 +230,24 @@ class LMinimalCache(Cache):
             self._grad[item] = value
         #print self._grad[item]
 
-    def setB(self, demand_d, path_id, B_value):  # set specific B value
+    def setB(self, demand_d, B_value):  # set specific B value
         if demand_d in self._B.keys():
-            self._B[demand_d][path_id] = B_value
+            self._B[demand_d] = B_value
         else:
-            self._B[demand_d] = {}
-            self._B[demand_d][path_id] = B_value
+            self._B[demand_d] = B_value
 
-    def getB(self, demand_d,path_id):  # read specific B value
+    def getB(self, demand_d):  # read specific B value
         if demand_d in self._B.keys():
-            if path_id in self._B[demand_d].keys():
-                return self._B[demand_d][path_id]
-        return 0
+            return self._B[demand_d]
+        else:
+            return 0
 
-    def AddOnScore_n(self, receive_node, val
+    def AddOnScore_n(self, receive_node, n_AddOnValue
                 ):  # update score n that used for power gradient est
         if receive_node in self._Score_n:
-            self._Score_n[receive_node] += val
+            self._Score_n[receive_node] += n_AddOnValue
         else:
-            self._Score_n[receive_node] = val
+            self._Score_n[receive_node] = n_AddOnValue
 
     def shuffle(self, time):
         T = time - self._last_shuffle_time
@@ -259,8 +258,13 @@ class LMinimalCache(Cache):
         #print "with grad",self._grad
         if T > 0.0:
             self._grad = scaleDictionary(self._grad, 1.0 / T)
+            #max_amp = float(np.amax(np.array(self._grad.values())) ) if len(self._grad)!=0 else 0.0
+            #max_amp = float(max_amp) / T
+            #self._grad = scaleDictionary(self._grad, max_amp)
 
-        if dictL2(self._grad) > 100 * self._capacity:
+        if dictL2(self._grad) == 0.0:
+            rescale = self._grad
+        elif dictL2(self._grad) > 100 * self._capacity or dictL2(self._grad) < 1.0:
             rescale = scaleDictionary(self._grad, 1.0 / dictL2(self._grad))
         else:
             rescale = self._grad
@@ -328,9 +332,6 @@ class LMinimalCache(Cache):
         self._grad = {}
         #self._Score_n = {}
         self._last_shuffle_time = time
-        if self._id == 4:
-            #print("** Node: " + str(self._id) + ", cache: "+str(self._cache))
-            pass
         #print("power state subgradient:" + str(self._w_gradient))
 
     def state(self, item):

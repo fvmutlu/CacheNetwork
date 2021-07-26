@@ -1,9 +1,11 @@
+import networkx as nx
 from networkx import Graph
+import numpy as np
+from matplotlib import pyplot as plt
 
 def Dtelekom():
     		G = Graph()
-#		nodeNumber = 68
-#		objectNumber = 1000
+
 		
 		G.add_node("Node00")
 		G.add_node("Node01")
@@ -465,3 +467,145 @@ def GEANT():
 		G.add_edge("nodeJ","nodeK")
 		G.add_edge("nodeK","nodeL")
 		return G
+
+def HetNet(hetnet_type,
+           N_SC_origin,
+           N_user,
+           path_loss_exponent,
+           random_seed,
+           R_MC=3.0,
+           R_SC=1.10,
+           d_SC=1.00
+           ):
+    np.random.seed(random_seed + 2015)
+    
+    if hetnet_type == 'random':
+        N_SC = N_SC_origin
+    else:
+        N_SC = int((N_SC_origin+1)**0.5)**2 -1
+        
+    G = Graph()
+    #Gain = {}
+    
+    N_nodes = 1 + 1 + N_SC + N_user
+    Pos_x = np.zeros(N_nodes)
+    Pos_y = np.zeros(N_nodes)
+    
+    MC_id = N_SC/2 +1 if (N_SC+1)**0.5%2 == 1 else (N_SC+1)**0.5 * ((N_SC+1)**0.5/2 + 0.5)
+    #print("MC_id = "+str(MC_id))
+    Node_Name = {}
+    Node_Name[0] = "Backhaul"
+    G.add_node("Backhaul") # node #0 is the backhaul
+    #Node_Name[0] = "0"
+    #G.add_node("0")
+    
+    SC_id = 1
+    for n_id in range(1,N_SC+2): # add nodes for MC and all SCs 
+        if hetnet_type == 'random':
+            theta = np.random.uniform(0,2*np.pi)
+            d0 = np.random.uniform() + np.random.uniform()
+            d = d0 if d0 <= 1.0 else 2.0-d0
+            Pos_x[n_id] = d*np.cos(theta)*R_MC
+            Pos_y[n_id] = d*np.sin(theta)*R_MC
+        else:
+            row = int((n_id-1) / int((N_SC+1)**0.5)) # starts from 0
+            column = (n_id-1) - row * int((N_SC+1)**0.5)
+            Pos_x[n_id] = (row -  0.5*((N_SC+1)**0.5-1)) * d_SC
+            Pos_y[n_id] = (column -  0.5*((N_SC+1)**0.5-1)) * d_SC
+            #print("n_id="+str(n_id)+", row="+str(row)+", column="+str(column)+", x="+str(Pos_x[n_id])+", y="+str(Pos_y[n_id]))
+        if n_id == MC_id:
+            Node_Name[n_id] = "MC"
+            G.add_node(Node_Name[n_id])
+        else:
+            Node_Name[n_id] = "SC"+str(SC_id)
+            G.add_node(Node_Name[n_id])
+            SC_id += 1
+        #Node_Name[n_id] = str(n_id)
+        
+    user_id = 1
+    for n_id in range(N_SC+2,N_nodes): # for all users
+        theta = np.random.uniform(0,2*np.pi)
+        d0 = np.random.uniform() + np.random.uniform()
+        d = d0 if d0 <= 1.0 else 2.0-d0
+        Pos_x[n_id] = d*np.cos(theta)*R_MC
+        Pos_y[n_id] = d*np.sin(theta)*R_MC
+        Node_Name[n_id] = "User"+str(user_id)
+        user_id += 1
+        G.add_node(Node_Name[n_id])
+        #Node_Name[n_id] = str(n_id)
+        
+    Distance = {} # compute pari-wise distance
+    for v_id in range(N_nodes):
+        Distance[v_id] = {}
+        for u_id in range(N_nodes):
+            if v_id == 0 or u_id == 0:
+                Distance[v_id][u_id] = 0.0 # no distance for Backhual node
+            else:
+                Distance[v_id][u_id] = np.sqrt( (Pos_x[v_id] - Pos_x[u_id])**2 + (Pos_y[v_id] - Pos_y[u_id])**2 )
+                
+    Gain = {} # compute pari-wise wireless gain
+    for v_id in range(N_nodes):
+        Gain[Node_Name[v_id]] = {}
+        for u_id in range(N_nodes):
+            if v_id == 0 or u_id == 0:
+                Gain[Node_Name[v_id]][Node_Name[u_id]] = 0.0
+            elif Distance[v_id][u_id] <= 1.0:
+                Gain[Node_Name[v_id]][Node_Name[u_id]] = 1.0
+            else:
+                Gain[Node_Name[v_id]][Node_Name[u_id]] = Distance[v_id][u_id] ** (-1.0* path_loss_exponent)
+    #print(Node_Name)
+    
+    # add edges for SC-MC
+    G.add_edge("Backhaul","MC")
+    #G.add_edge(Node_Name[0],Node_Name[MC_id])
+    for v_id in range(1,N_SC+2):
+        if v_id != MC_id:
+            G.add_edge(Node_Name[v_id],"MC")
+            #G.add_edge(Node_Name[v_id],Node_Name[MC_id])
+    
+    # add edges between SCs
+    for v_id in range(1,N_SC+2):
+        for u_id in range(1,N_SC+2):
+            if v_id != u_id and v_id != MC_id and u_id != MC_id and (u_id,v_id) not in G.edges() and Distance[v_id][u_id] <= R_SC:
+                G.add_edge(Node_Name[v_id],Node_Name[u_id])
+                
+    # add edges for User-SC/MC
+    for user_id in range(N_SC+2,N_nodes):
+        min_id = 0
+        min_d = R_MC
+        for BS_id in range(1,N_SC+2):
+            d = Distance[user_id][BS_id]
+            if d < min_d:
+                min_id = BS_id
+                min_d = d
+        G.add_edge(Node_Name[user_id],Node_Name[min_id])
+    #print(Pos_x)
+    #print(Pos_y)
+    #print(G.nodes())
+    #print(G.edges())
+    #print(Gain)
+    
+    
+    # assign draw specs
+    node_catalog = ["Backhaul","MC","SC","User"]
+    size_book = {"Backhaul":0.0, "MC":100.0, "SC":50.0, "User":20.0}
+    color_book = {"Backhaul":'purple', "MC":'purple', "SC":'red', "User":'blue'}
+    for n_id in range(N_nodes):
+        n_name = Node_Name[n_id]
+        G.node[n_name]['pos'] = (Pos_x[n_id],Pos_y[n_id])
+        for n_type_iter in node_catalog:
+            if n_name.startswith(n_type_iter):
+                n_type = n_type_iter
+                break
+        G.node[n_name]['size'] = size_book[n_type]
+        G.node[n_name]['color'] = color_book[n_type]
+        
+    pos = nx.get_node_attributes(G,'pos')
+    size = nx.get_node_attributes(G,'size')
+    color = nx.get_node_attributes(G,'color')
+    nx.draw(G, pos, node_size = size.values(), node_color = color.values())
+    plt.axis('equal')
+    plt.savefig("hetnet.png")
+    
+    return G,Gain
+    
